@@ -1,38 +1,55 @@
 use core::cmp::min;
+use std::mem::MaybeUninit;
 
 use log::info;
 
 pub struct RingBuf<const N: usize> {
-    buf: [u8; N],
+    buf: MaybeUninit<[u8; N]>,
     start: usize,
     end: usize,
     empty: bool,
+    alert: bool,
 }
 
 impl<const N: usize> RingBuf<N> {
     pub const fn new() -> Self {
         Self {
-            buf: [0; N],
+            buf: MaybeUninit::uninit(),
             start: 0,
             end: 0,
             empty: true,
+            alert: true,
         }
     }
 
-    pub fn push(&mut self, data: &[u8]) {
+    pub const fn new2() -> Self {
+        Self {
+            buf: MaybeUninit::uninit(),
+            start: 0,
+            end: 0,
+            empty: true,
+            alert: false,
+        }
+    }
+
+    pub fn push(&mut self, data: &[u8]) -> usize {
         let mut offset = 0;
 
         while offset < data.len() {
-            let len = min(self.buf.len() - self.end, data.len() - offset);
+            let buf: &mut [u8] = unsafe { self.buf.assume_init_mut() };
 
-            self.buf[self.end..self.end + len].copy_from_slice(&data[offset..offset + len]);
+            let len = min(buf.len() - self.end, data.len() - offset);
+
+            buf[self.end..self.end + len].copy_from_slice(&data[offset..offset + len]);
 
             offset += len;
 
             if !self.empty && self.start >= self.end && self.start < self.end + len {
                 // Dropping oldest data
                 self.start = self.end + len;
-                info!("Dropping oldest data");
+                if self.alert {
+                    info!("Dropping oldest data");
+                }
             }
 
             self.end += len;
@@ -41,22 +58,26 @@ impl<const N: usize> RingBuf<N> {
 
             self.empty = false;
         }
+
+        self.len()
     }
 
-    pub fn pop(&mut self, buf: &mut [u8]) -> usize {
+    pub fn pop(&mut self, out_buf: &mut [u8]) -> usize {
         let mut offset = 0;
 
-        while offset < buf.len() && !self.empty {
+        while offset < out_buf.len() && !self.empty {
+            let buf: &mut [u8] = unsafe { self.buf.assume_init_mut() };
+
             let len = min(
                 if self.start < self.end {
                     self.end
                 } else {
-                    self.buf.len()
+                    buf.len()
                 } - self.start,
-                buf.len() - offset,
+                out_buf.len() - offset,
             );
 
-            buf[offset..offset + len].copy_from_slice(&self.buf[self.start..self.start + len]);
+            out_buf[offset..offset + len].copy_from_slice(&buf[self.start..self.start + len]);
 
             self.start += len;
 
@@ -87,7 +108,9 @@ impl<const N: usize> RingBuf<N> {
         } else if self.start < self.end {
             self.end - self.start
         } else {
-            self.buf.len() + self.end - self.start
+            let buf: &[u8] = unsafe { self.buf.assume_init_ref() };
+
+            buf.len() + self.end - self.start
         }
     }
 
@@ -98,11 +121,13 @@ impl<const N: usize> RingBuf<N> {
     }
 
     fn wrap(&mut self) {
-        if self.start == self.buf.len() {
+        let buf: &[u8] = unsafe { self.buf.assume_init_ref() };
+
+        if self.start == buf.len() {
             self.start = 0;
         }
 
-        if self.end == self.buf.len() {
+        if self.end == buf.len() {
             self.end = 0;
         }
     }
