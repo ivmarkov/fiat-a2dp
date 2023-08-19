@@ -23,7 +23,7 @@ use esp_idf_sys::{
 };
 
 use esp_idf_hal::{
-    adc::{AdcContConfig, AdcContDriver, AdcMeasurement, Attenuated},
+    adc::{AdcContConfig, AdcContDriver, AdcMeasurement, Attenuated, EmptyAdcChannels},
     gpio::{AnyIOPin, InputPin, OutputPin},
     i2s::{
         config::{
@@ -90,7 +90,7 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
                 notif.signal(());
             }
 
-            if self.ringbuf_outgoing.len() > 300 {
+            if self.ringbuf_outgoing.len() > 500 {
                 outgoing_notif();
             }
 
@@ -139,10 +139,7 @@ fn main() -> Result<(), EspError> {
     let adc_driver = AdcContDriver::new(
         peripherals.adc1,
         peripherals.i2s0,
-        &AdcContConfig::new()
-            .sample_freq(38000.Hz())
-            .frame_measurements(1000)
-            .frames_count(4),
+        &AdcContConfig::new().sample_freq(38000.Hz()),
         Attenuated::db11(peripherals.pins.gpio32),
     )?;
 
@@ -263,12 +260,22 @@ fn main() -> Result<(), EspError> {
     let mut tasks = heapless::Vec::<_, 64>::new();
 
     let adc_buf = make_static!([AdcMeasurement::INIT; 2000]);
+    let adc_resample_buf = make_static!([0u8; 4000]);
+
     let i2s_buf = make_static!([0u8; 4000]);
 
     executor
         .spawn_local_collect(
             async move {
-                adc_process(adc_driver, adc_buf, || {}).await.unwrap();
+                adc_process(
+                    adc_driver,
+                    adc_buf,
+                    adc_resample_buf,
+                    |data, out_buf| hfpc.pcm_resample(data, out_buf),
+                    || {},
+                )
+                .await
+                .unwrap();
             },
             &mut tasks,
         )
@@ -288,46 +295,41 @@ fn main() -> Result<(), EspError> {
     Ok(())
 }
 
-async fn adc_process<O>(
+async fn adc_process<F, O>(
     mut adc: AdcContDriver<'_>,
     adc_buf: &mut [AdcMeasurement],
+    adc_resample_buf: &mut [u8],
+    resample: F,
     notify_outgoing: O,
 ) -> Result<(), EspError>
 where
+    F: Fn(&[u8], &mut [u8]) -> Result<usize, EspError>,
     O: Fn(),
 {
     adc.start()?;
 
     loop {
         let len = adc.read_async(adc_buf).await?;
+        //info!("MAIN: {:?}", &adc_buf[..len]);
 
         if len > 0 {
-            let adc_buf = AdcMeasurement::as_pcm16(&mut adc_buf[..len]);
+            // let adc_buf = AdcMeasurement::as_pcm16(&mut adc_buf[..len]);
 
-            for src_offset in (0..len).step_by(4) {
-                let dst_offset = src_offset >> 1;
-                adc_buf[dst_offset] = adc_buf[src_offset]
-                    + adc_buf[src_offset + 1]
-                    + adc_buf[src_offset + 2]
-                    + adc_buf[src_offset + 3];
-                adc_buf[dst_offset + 1] = adc_buf[dst_offset];
-            }
+            // let len = resample(as_u8_slice(adc_buf), adc_resample_buf)?;
 
             // if len > 0 {
-            AUDIO_BUFFERS.lock(|buffers| {
-                let mut buffers = buffers.borrow_mut();
+                AUDIO_BUFFERS.lock(|buffers| {
+                    let mut buffers = buffers.borrow_mut();
 
-                // for src_offset in (0..len).step_by(4) {
-                //     let sample = (adc_buf[src_offset].data() + adc_buf[src_offset + 1].data() + adc_buf[src_offset + 2].data() + adc_buf[src_offset + 3].data());
-                //     let sample = u16::to_ne_bytes(sample);
-                //     buffers.push_outgoing(&sample, false);
-                //     buffers.push_outgoing(&sample, false);
-                // }
+                    for i in (0..len).step_by(4) {
+                        let sample = adc_buf[i].data() + adc_buf[i + 1].data() + adc_buf[i + 2].data() + adc_buf[i + 3].data();
+                        let sample = u16::to_ne_bytes(sample);
+                        buffers.push_outgoing(&sample, false);
+                        buffers.push_outgoing(&sample, false);
+                    }
 
-                buffers.push_outgoing(as_u8_slice(&adc_buf[..(len >> 2)]), false);
-
-                notify_outgoing();
-            });
+                    notify_outgoing();
+                });
             // }
         }
     }
