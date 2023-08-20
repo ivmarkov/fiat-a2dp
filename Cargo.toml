@@ -18,6 +18,7 @@ esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys" }
 #esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal", branch="async-drivers" }
 esp-idf-hal = { path = "../esp-idf-hal" }
 esp-idf-svc = { path = "../esp-idf-svc" }
+embedded-svc = { path = "../embedded-svc" }
 
 [features]
 default = ["std", "hal", "esp-idf-sys/native", "embassy"]

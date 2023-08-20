@@ -1,37 +1,25 @@
 use core::cmp::min;
 use std::mem::MaybeUninit;
 
-use log::info;
-
 pub struct RingBuf<const N: usize> {
     buf: MaybeUninit<[u8; N]>,
     start: usize,
     end: usize,
     empty: bool,
-    alert: bool,
 }
 
 impl<const N: usize> RingBuf<N> {
+    #[inline(always)]
     pub const fn new() -> Self {
         Self {
             buf: MaybeUninit::uninit(),
             start: 0,
             end: 0,
             empty: true,
-            alert: true,
         }
     }
 
-    pub const fn new2() -> Self {
-        Self {
-            buf: MaybeUninit::uninit(),
-            start: 0,
-            end: 0,
-            empty: true,
-            alert: false,
-        }
-    }
-
+    #[inline(always)]
     pub fn push(&mut self, data: &[u8]) -> usize {
         let mut offset = 0;
 
@@ -47,9 +35,6 @@ impl<const N: usize> RingBuf<N> {
             if !self.empty && self.start >= self.end && self.start < self.end + len {
                 // Dropping oldest data
                 self.start = self.end + len;
-                if self.alert {
-                    info!("Dropping oldest data");
-                }
             }
 
             self.end += len;
@@ -62,6 +47,27 @@ impl<const N: usize> RingBuf<N> {
         self.len()
     }
 
+    #[inline(always)]
+    pub fn push_byte(&mut self, data: u8) -> usize {
+        let buf: &mut [u8] = unsafe { self.buf.assume_init_mut() };
+
+        buf[self.end] = data;
+
+        if !self.empty && self.start == self.end {
+            // Dropping oldest data
+            self.start = self.end + 1;
+        }
+
+        self.end += 1;
+
+        self.wrap();
+
+        self.empty = false;
+
+        self.len()
+    }
+
+    #[inline(always)]
     pub fn pop(&mut self, out_buf: &mut [u8]) -> usize {
         let mut offset = 0;
 
@@ -93,14 +99,17 @@ impl<const N: usize> RingBuf<N> {
         offset
     }
 
+    #[inline(always)]
     pub fn is_full(&self) -> bool {
         self.start == self.end && !self.empty
     }
 
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.empty
     }
 
+    #[inline(always)]
     #[allow(unused)]
     pub fn len(&self) -> usize {
         if self.empty {
@@ -114,12 +123,14 @@ impl<const N: usize> RingBuf<N> {
         }
     }
 
+    #[inline(always)]
     pub fn clear(&mut self) {
         self.start = 0;
         self.end = 0;
         self.empty = true;
     }
 
+    #[inline(always)]
     fn wrap(&mut self) {
         let buf: &[u8] = unsafe { self.buf.assume_init_ref() };
 
