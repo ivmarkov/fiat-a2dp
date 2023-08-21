@@ -5,7 +5,7 @@ use esp_idf_svc::{
             Cod, CodMode, DeviceProp, DiscoveryMode, EspGap, GapEvent, IOCapabilities, InqMode,
             PropData,
         },
-        hfp::client::{EspHfpc, HfpcEvent, Source},
+        hfp::client::{AudioStatus, EspHfpc, HfpcEvent, Source},
         BtClassic, BtClassicEnabled, BtDriver,
     },
     nvs::EspDefaultNvsPartition,
@@ -22,7 +22,7 @@ use log::*;
 
 use crate::audio::AUDIO_BUFFERS;
 
-pub async fn bt<'d>(
+pub async fn process<'d>(
     modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
     nvs: EspDefaultNvsPartition,
 ) -> Result<(), EspError> {
@@ -58,7 +58,7 @@ pub async fn bt<'d>(
 
     let hfpc = EspHfpc::new(&bt, None)?;
 
-    info!("HPFC created");
+    info!("HFPC created");
 
     gap.initialize(|event| handle_gap(&gap, event))?;
 
@@ -74,7 +74,7 @@ pub async fn bt<'d>(
 
     hfpc.initialize(|event| handle_hfpc(&hfpc, event))?;
 
-    info!("HPFC initialized");
+    info!("HFPC initialized");
 
     a2dp.set_delay(core::time::Duration::from_millis(150))?;
 
@@ -125,8 +125,13 @@ where
     M: BtClassicEnabled,
 {
     match event {
-        HfpcEvent::IncomingCall => {
-            hfpc.answer().unwrap();
+        HfpcEvent::AudioState { status, .. } => {
+            AUDIO_BUFFERS.lock(|buffers| {
+                buffers.borrow_mut().set_a2dp(!matches!(
+                    status,
+                    AudioStatus::Connected | AudioStatus::ConnectedMsbc
+                ));
+            });
 
             0
         }

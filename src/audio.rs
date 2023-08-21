@@ -18,6 +18,7 @@ use esp_idf_hal::{
     task::embassy_sync::EspRawMutex,
     units::*,
 };
+use log::info;
 
 use crate::ringbuf::RingBuf;
 
@@ -64,11 +65,11 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
         if self.a2dp == a2dp && !data.is_empty() {
             let len = self.ringbuf_incoming.push(data);
 
-            if len > 0 {
+            if self.is_incoming_above_watermark(a2dp) {
                 AUDIO_BUFFERS_INCOMING_NOTIF.signal(());
             }
 
-            if self.ringbuf_outgoing.len() > 300 {
+            if self.is_outgoing_above_watermark(a2dp) {
                 outgoing_notif();
             }
 
@@ -80,7 +81,7 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
 
     #[inline(always)]
     fn pop_incoming(&mut self, buf: &mut [u8], a2dp: bool) -> usize {
-        if self.a2dp == a2dp && !buf.is_empty() {
+        if self.is_incoming_above_watermark(a2dp) {
             self.ringbuf_incoming.pop(buf)
         } else {
             0
@@ -98,20 +99,31 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
 
     #[inline(always)]
     pub fn pop_outgoing(&mut self, buf: &mut [u8], a2dp: bool) -> usize {
-        if self.a2dp == a2dp {
+        if self.is_outgoing_above_watermark(a2dp) {
             self.ringbuf_outgoing.pop(buf)
         } else {
             0
         }
     }
+
+    #[inline(always)]
+    fn is_incoming_above_watermark(&self, a2dp: bool) -> bool {
+        self.a2dp == a2dp
+            && self.ringbuf_incoming.len() >= (if a2dp { I / 3 * 2 } else { I / 12 * 2 })
+    }
+
+    #[inline(always)]
+    fn is_outgoing_above_watermark(&self, a2dp: bool) -> bool {
+        self.a2dp == a2dp && !a2dp && self.ringbuf_outgoing.len() >= O / 3 * 2
+    }
 }
 
-pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<16384, 16384>>> =
-    Mutex::new(RefCell::new(AudioBuffers::new(false)));
+pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>> =
+    Mutex::new(RefCell::new(AudioBuffers::new(true)));
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
-pub async fn adc_process<'d, O>(
+pub async fn process_outgoing<'d, O>(
     adc1: impl Peripheral<P = ADC1> + 'd,
     pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>> + 'd,
     i2s0: impl Peripheral<P = I2S0> + 'd,
@@ -121,12 +133,14 @@ pub async fn adc_process<'d, O>(
 where
     O: Fn(),
 {
+    info!("Creating ADC 22kHz input");
+
     let mut adc_driver = AdcContDriver::new(
         adc1,
         i2s0,
         &AdcContConfig::new()
-            .sample_freq(38000.Hz())
-            .frame_measurements(1000)
+            .sample_freq(20000.Hz())
+            .frame_measurements(500)
             .frames_count(4),
         Attenuated::db11(pin),
     )?;
@@ -140,12 +154,9 @@ where
             if false {
                 let adc_buf = AdcMeasurement::as_pcm16(&mut adc_buf[..len]);
 
-                for src_offset in (0..len).step_by(4) {
-                    let dst_offset = src_offset >> 1;
-                    adc_buf[dst_offset] = adc_buf[src_offset]
-                        + adc_buf[src_offset + 1]
-                        + adc_buf[src_offset + 2]
-                        + adc_buf[src_offset + 3];
+                for src_offset in (0..len).step_by(2) {
+                    let dst_offset = src_offset;
+                    adc_buf[dst_offset] = adc_buf[src_offset] + adc_buf[src_offset + 1];
                     adc_buf[dst_offset + 1] = adc_buf[dst_offset];
                 }
 
@@ -164,11 +175,9 @@ where
                         let mut buffers = buffers.borrow_mut();
                         let outgoing = buffers.outgoing();
 
-                        for src_offset in (0..len).step_by(4) {
-                            let sample = adc_buf[src_offset].data()
-                                + adc_buf[src_offset + 1].data()
-                                + adc_buf[src_offset + 2].data()
-                                + adc_buf[src_offset + 3].data();
+                        for src_offset in (0..len).step_by(2) {
+                            let sample =
+                                adc_buf[src_offset].data() + adc_buf[src_offset + 1].data();
 
                             let ls = (sample & 0xff) as u8;
                             let ms = (sample >> 8) as u8;
@@ -187,16 +196,18 @@ where
     }
 }
 
-pub async fn i2s_process(
+pub async fn process_incoming(
     mut i2s: impl Peripheral<P = impl I2s>,
     mut bclk: impl Peripheral<P = impl InputPin + OutputPin>,
     mut dout: impl Peripheral<P = impl OutputPin>,
     mut ws: impl Peripheral<P = impl InputPin + OutputPin>,
     buf: &mut [u8],
 ) -> Result<(), EspError> {
-    let mut a2dp_conf = false;
+    let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
 
     loop {
+        info!("Creating I2S output with A2DP: {}", a2dp_conf);
+
         let mut driver = i2s_create(&mut i2s, &mut bclk, &mut dout, &mut ws, a2dp_conf)?;
 
         loop {
@@ -218,9 +229,9 @@ pub async fn i2s_process(
                 break;
             } else if len > 0 {
                 driver.write_all_async(&buf[..len]).await?;
+            } else {
+                AUDIO_BUFFERS_INCOMING_NOTIF.wait().await;
             }
-
-            AUDIO_BUFFERS_INCOMING_NOTIF.wait().await;
         }
     }
 }

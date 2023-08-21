@@ -8,8 +8,6 @@ use esp_idf_hal::{adc::AdcMeasurement, peripherals::Peripherals, task::executor:
 
 use static_cell::make_static;
 
-use crate::audio::{adc_process, i2s_process};
-
 mod audio;
 mod bt;
 mod ringbuf;
@@ -37,20 +35,20 @@ fn main() -> Result<(), EspError> {
     let executor = Executor::<8, FreeRtosMonitor>::new();
     let mut tasks = heapless::Vec::<_, 8>::new();
 
-    let adc_buf = make_static!([AdcMeasurement::INIT; 2000]);
+    let adc_buf = make_static!([AdcMeasurement::INIT; 1000]);
     let i2s_buf = make_static!([0u8; 4000]);
 
     executor
         .spawn_local_collect(
             async move {
-                bt::bt(modem, nvs).await.unwrap();
+                bt::process(modem, nvs).await.unwrap();
             },
             &mut tasks,
         )
         .unwrap()
         .spawn_local_collect(
             async move {
-                adc_process(adc1, adc_pin, i2s0, adc_buf, || {})
+                audio::process_outgoing(adc1, adc_pin, i2s0, adc_buf, || {})
                     .await
                     .unwrap();
             },
@@ -59,7 +57,7 @@ fn main() -> Result<(), EspError> {
         .unwrap()
         .spawn_local_collect(
             async move {
-                i2s_process(i2s, i2s_bclk, i2s_dout, i2s_ws, i2s_buf)
+                audio::process_incoming(i2s, i2s_bclk, i2s_dout, i2s_ws, i2s_buf)
                     .await
                     .unwrap();
             },
