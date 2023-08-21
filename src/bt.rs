@@ -1,6 +1,7 @@
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, EspA2dp, SinkEnabled},
+        avrc::controller::{AvrccEvent, EspAvrcc, NotificationType},
         gap::{
             Cod, CodMode, DeviceProp, DiscoveryMode, EspGap, GapEvent, IOCapabilities, InqMode,
             PropData,
@@ -52,6 +53,10 @@ pub async fn process<'d>(
 
     //gap.set_cod(Cod::new(), CodMode::SetAll)?;
 
+    let avrcc = EspAvrcc::new(&bt)?;
+
+    info!("AVRCC created");
+
     let a2dp = EspA2dp::new_sink(&bt)?;
 
     info!("A2DP created");
@@ -67,6 +72,10 @@ pub async fn process<'d>(
     gap.set_scan_mode(true, DiscoveryMode::Discoverable)?;
 
     info!("GAP initialized");
+
+    avrcc.initialize(|event| handle_avrcc(&avrcc, event))?;
+
+    info!("AVRCC initialized");
 
     a2dp.initialize(|event| handle_a2dp(&a2dp, event))?;
 
@@ -152,5 +161,31 @@ where
             buffers.pop_outgoing(data, false)
         }),
         _ => 0,
+    }
+}
+
+fn handle_avrcc<'d, M>(avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>, event: AvrccEvent<'_>)
+where
+    M: BtClassicEnabled,
+{
+    match event {
+        AvrccEvent::Connected(_) | AvrccEvent::Notification(_) => {
+            avrcc
+                .register_notification(0, NotificationType::PlaybackPosition, 1000)
+                .unwrap();
+            avrcc
+                .register_notification(1, NotificationType::Playback, 0)
+                .unwrap();
+            avrcc
+                .register_notification(2, NotificationType::TrackChanged, 0)
+                .unwrap();
+            // avrcc
+            //     .register_notification(3, NotificationType::TrackStart, 0)
+            //     .unwrap();
+            // avrcc
+            //     .register_notification(4, NotificationType::TrackEnd, 0)
+            //     .unwrap();
+        }
+        _ => (),
     }
 }
