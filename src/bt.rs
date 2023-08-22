@@ -1,7 +1,8 @@
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, EspA2dp, SinkEnabled},
-        avrc::controller::{AvrccEvent, EspAvrcc, NotificationType},
+        avrc::controller::{AvrccEvent, EspAvrcc},
+        avrc::{MetadataId, NotificationType},
         gap::{
             Cod, CodMode, DeviceProp, DiscoveryMode, EspGap, GapEvent, IOCapabilities, InqMode,
             PropData,
@@ -168,22 +169,35 @@ fn handle_avrcc<'d, M>(avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>, event: AvrccEv
 where
     M: BtClassicEnabled,
 {
-    match event {
+    match &event {
         AvrccEvent::Connected(_) | AvrccEvent::Notification(_) => {
+            if matches!(event, AvrccEvent::Connected(_)) {
+                avrcc.request_capabilities(0).unwrap();
+            }
+
             avrcc
-                .register_notification(0, NotificationType::PlaybackPosition, 1000)
+                .register_notification(1, NotificationType::PlaybackPosition, 1000)
                 .unwrap();
             avrcc
-                .register_notification(1, NotificationType::Playback, 0)
+                .register_notification(2, NotificationType::Playback, 0)
                 .unwrap();
             avrcc
-                .register_notification(2, NotificationType::TrackChanged, 0)
+                .register_notification(3, NotificationType::TrackChanged, 0)
+                .unwrap();
+            avrcc
+                .request_metadata(
+                    4,
+                    MetadataId::Title
+                        | MetadataId::Artist
+                        | MetadataId::Album
+                        | MetadataId::PlayingTime,
+                )
                 .unwrap();
             // avrcc
-            //     .register_notification(3, NotificationType::TrackStart, 0)
+            //     .register_notification(5, NotificationType::TrackStart, 0)
             //     .unwrap();
             // avrcc
-            //     .register_notification(4, NotificationType::TrackEnd, 0)
+            //     .register_notification(6, NotificationType::TrackEnd, 0)
             //     .unwrap();
         }
         _ => (),

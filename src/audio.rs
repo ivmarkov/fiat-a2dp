@@ -156,7 +156,7 @@ where
 
                 for src_offset in (0..len).step_by(2) {
                     let dst_offset = src_offset;
-                    adc_buf[dst_offset] = adc_buf[src_offset] + adc_buf[src_offset + 1];
+                    adc_buf[dst_offset] = (adc_buf[src_offset] + adc_buf[src_offset + 1]) << 1;
                     adc_buf[dst_offset + 1] = adc_buf[dst_offset];
                 }
 
