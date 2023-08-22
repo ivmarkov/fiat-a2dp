@@ -2,9 +2,9 @@ use core::cell::RefCell;
 
 use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
 
-use esp_idf_sys::EspError;
+use esp_idf_svc::sys::EspError;
 
-use esp_idf_hal::{
+use esp_idf_svc::hal::{
     adc::{AdcContConfig, AdcContDriver, AdcMeasurement, Attenuated, ADC1},
     gpio::{ADCPin, AnyIOPin, InputPin, OutputPin},
     i2s::{
@@ -18,6 +18,7 @@ use esp_idf_hal::{
     task::embassy_sync::EspRawMutex,
     units::*,
 };
+
 use log::info;
 
 use crate::ringbuf::RingBuf;

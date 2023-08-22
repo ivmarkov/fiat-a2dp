@@ -1,3 +1,8 @@
+use esp_idf_svc::sys::{
+    esp, esp_bt_cod_major_dev_t_ESP_BT_COD_MAJOR_DEV_AV, esp_bt_cod_mode_t_ESP_BT_INIT_COD,
+    esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_AUDIO, esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_TELEPHONY,
+    esp_bt_gap_set_cod, EspError,
+};
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, EspA2dp, SinkEnabled},
@@ -12,13 +17,8 @@ use esp_idf_svc::{
     },
     nvs::EspDefaultNvsPartition,
 };
-use esp_idf_sys::{
-    esp, esp_bt_cod_major_dev_t_ESP_BT_COD_MAJOR_DEV_AV, esp_bt_cod_mode_t_ESP_BT_INIT_COD,
-    esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_AUDIO, esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_TELEPHONY,
-    esp_bt_gap_set_cod, EspError,
-};
 
-use esp_idf_hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral};
+use esp_idf_svc::hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral};
 
 use log::*;
 

@@ -1,10 +1,9 @@
 #![feature(type_alias_impl_trait)]
 
-use edge_executor::Executor;
+use esp_idf_svc::hal::sys::EspError;
+use esp_idf_svc::hal::task::executor::EspExecutor;
+use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_sys::EspError;
-
-use esp_idf_hal::{adc::AdcMeasurement, peripherals::Peripherals, task::executor::FreeRtosMonitor};
 
 use static_cell::make_static;
 
@@ -13,7 +12,7 @@ mod bt;
 mod ringbuf;
 
 fn main() -> Result<(), EspError> {
-    esp_idf_sys::link_patches();
+    esp_idf_svc::hal::sys::link_patches();
 
     esp_idf_svc::log::EspLogger::initialize_default();
 
@@ -32,7 +31,7 @@ fn main() -> Result<(), EspError> {
 
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let executor = Executor::<8, FreeRtosMonitor>::new();
+    let executor = EspExecutor::<8, _>::new();
     let mut tasks = heapless::Vec::<_, 8>::new();
 
     let adc_buf = make_static!([AdcMeasurement::INIT; 1000]);
