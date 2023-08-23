@@ -1,18 +1,14 @@
-use esp_idf_svc::sys::{
-    esp, esp_bt_cod_major_dev_t_ESP_BT_COD_MAJOR_DEV_AV, esp_bt_cod_mode_t_ESP_BT_INIT_COD,
-    esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_AUDIO, esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_TELEPHONY,
-    esp_bt_gap_set_cod, EspError,
-};
+use esp_idf_svc::sys::EspError;
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, EspA2dp, SinkEnabled},
         avrc::controller::{AvrccEvent, EspAvrcc},
         avrc::{MetadataId, NotificationType},
         gap::{
-            Cod, CodMode, DeviceProp, DiscoveryMode, EspGap, GapEvent, IOCapabilities, InqMode,
-            PropData,
+            Cod, CodMajorDeviceType, CodMode, CodServiceClass, DeviceProp, DiscoveryMode, EspGap,
+            GapEvent, IOCapabilities, InqMode, PropData,
         },
-        hfp::client::{AudioStatus, EspHfpc, HfpcEvent, Source},
+        hfp::client::{AudioStatus, EspHfpc, HfpcEvent},
         BtClassic, BtClassicEnabled, BtDriver,
     },
     nvs::EspDefaultNvsPartition,
@@ -38,22 +34,6 @@ pub async fn process<'d>(
 
     info!("GAP created");
 
-    // TODO
-    esp!(unsafe {
-        esp_bt_gap_set_cod(
-            Cod::new(
-                esp_bt_cod_major_dev_t_ESP_BT_COD_MAJOR_DEV_AV,
-                0,
-                esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_AUDIO
-                    | esp_bt_cod_srvc_t_ESP_BT_COD_SRVC_TELEPHONY,
-            )
-            .raw(),
-            esp_bt_cod_mode_t_ESP_BT_INIT_COD,
-        )
-    })?;
-
-    //gap.set_cod(Cod::new(), CodMode::SetAll)?;
-
     let avrcc = EspAvrcc::new(&bt)?;
 
     info!("AVRCC created");
@@ -67,6 +47,15 @@ pub async fn process<'d>(
     info!("HFPC created");
 
     gap.initialize(|event| handle_gap(&gap, event))?;
+
+    gap.set_cod(
+        Cod::new(
+            CodMajorDeviceType::AudioVideo,
+            0,
+            CodServiceClass::Audio | CodServiceClass::Telephony,
+        ),
+        CodMode::Init,
+    )?;
 
     gap.set_ssp_io_cap(IOCapabilities::None)?;
     gap.set_pin("1234")?;

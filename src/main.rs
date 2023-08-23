@@ -1,9 +1,9 @@
 #![feature(type_alias_impl_trait)]
 
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::hal::sys::EspError;
 use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
 use static_cell::make_static;
 
