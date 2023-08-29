@@ -9,6 +9,7 @@ use static_cell::make_static;
 
 mod audio;
 mod bt;
+mod can;
 mod ringbuf;
 
 fn main() -> Result<(), EspError> {
