@@ -5,12 +5,14 @@ use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
+use state::StateSignal;
 use static_cell::make_static;
 
 mod audio;
 mod bt;
 mod can;
 mod ringbuf;
+mod state;
 
 fn main() -> Result<(), EspError> {
     esp_idf_svc::sys::link_patches();
@@ -38,13 +40,19 @@ fn main() -> Result<(), EspError> {
     let adc_buf = make_static!([AdcMeasurement::INIT; 1000]);
     let i2s_buf = make_static!([0u8; 4000]);
 
+    let phone_signal_audio = &StateSignal::new();
+
     executor
         .spawn_local_collect(
             async move {
-                bt::process(modem, nvs).await.unwrap();
+                bt::process(modem, nvs, &[], &[], &[phone_signal_audio])
+                    .await
+                    .unwrap();
             },
             &mut tasks,
         )
+        .unwrap()
+        .spawn_local_collect(audio::process_signals(phone_signal_audio), &mut tasks)
         .unwrap()
         .spawn_local_collect(
             async move {

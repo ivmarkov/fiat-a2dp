@@ -1,3 +1,5 @@
+use esp_idf_svc::bt::a2dp::ConnectionStatus;
+use esp_idf_svc::bt::hfp::client;
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::{
     bt::{
@@ -19,10 +21,14 @@ use esp_idf_svc::hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral};
 use log::*;
 
 use crate::audio::AUDIO_BUFFERS;
+use crate::state::{signal_all, AudioState, BtState, PhoneState, StateSignal};
 
 pub async fn process<'d>(
     modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
     nvs: EspDefaultNvsPartition,
+    bt_signals: &[&StateSignal<BtState>],
+    audio_signals: &[&StateSignal<AudioState>],
+    phone_signals: &[&StateSignal<PhoneState>],
 ) -> Result<(), EspError> {
     let bt = BtDriver::<BtClassic>::new(modem, Some(nvs))?;
 
@@ -46,7 +52,7 @@ pub async fn process<'d>(
 
     info!("HFPC created");
 
-    gap.initialize(|event| handle_gap(&gap, event))?;
+    gap.initialize(|event| handle_gap(&gap, bt_signals, event))?;
 
     gap.set_cod(
         Cod::new(
@@ -67,11 +73,11 @@ pub async fn process<'d>(
 
     info!("AVRCC initialized");
 
-    a2dp.initialize(|event| handle_a2dp(&a2dp, event))?;
+    a2dp.initialize(|event| handle_a2dp(&a2dp, audio_signals, event))?;
 
     info!("A2DP initialized");
 
-    hfpc.initialize(|event| handle_hfpc(&hfpc, event))?;
+    hfpc.initialize(|event| handle_hfpc(&hfpc, phone_signals, event))?;
 
     info!("HFPC initialized");
 
@@ -80,8 +86,11 @@ pub async fn process<'d>(
     core::future::pending().await
 }
 
-fn handle_gap<'d, M>(gap: &EspGap<'d, M, &BtDriver<'d, M>>, event: GapEvent<'_>)
-where
+fn handle_gap<'d, M>(
+    gap: &EspGap<'d, M, &BtDriver<'d, M>>,
+    signals: &[&StateSignal<BtState>],
+    event: GapEvent<'_>,
+) where
     M: BtClassicEnabled,
 {
     match event {
@@ -103,11 +112,19 @@ where
 
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
+    signals: &[&StateSignal<AudioState>],
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
 {
     match event {
+        A2dpEvent::Initialized => signal_all(signals, AudioState::Initialized),
+        A2dpEvent::Deinitialized => signal_all(signals, AudioState::Uninitialized),
+        A2dpEvent::ConnectionState { status, .. } => match status {
+            ConnectionStatus::Connected => signal_all(signals, AudioState::Connected),
+            ConnectionStatus::Disconnected => signal_all(signals, AudioState::Initialized),
+            _ => (),
+        },
         A2dpEvent::SinkData(data) => {
             AUDIO_BUFFERS.lock(|buffers| {
                 let mut buffers = buffers.borrow_mut();
@@ -119,11 +136,28 @@ fn handle_a2dp<'d, M>(
     }
 }
 
-fn handle_hfpc<'d, M>(hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>, event: HfpcEvent<'_>) -> usize
+fn handle_hfpc<'d, M>(
+    hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
+    signals: &[&StateSignal<PhoneState>],
+    event: HfpcEvent<'_>,
+) -> usize
 where
     M: BtClassicEnabled,
 {
     match event {
+        HfpcEvent::ConnectionState { status, .. } => {
+            match status {
+                client::ConnectionStatus::Disconnected => {
+                    signal_all(signals, PhoneState::Initialized)
+                }
+                client::ConnectionStatus::Connected | client::ConnectionStatus::SlcConnected => {
+                    signal_all(signals, PhoneState::Connected)
+                }
+                _ => (),
+            }
+
+            0
+        }
         HfpcEvent::AudioState { status, .. } => {
             AUDIO_BUFFERS.lock(|buffers| {
                 buffers.borrow_mut().set_a2dp(!matches!(

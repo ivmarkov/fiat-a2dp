@@ -22,6 +22,7 @@ use esp_idf_svc::hal::{
 use log::info;
 
 use crate::ringbuf::RingBuf;
+use crate::state::{PhoneState, StateSignal};
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -123,6 +124,16 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
     Mutex::new(RefCell::new(AudioBuffers::new(true)));
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
+
+pub async fn process_signals(phone_signal: &StateSignal<PhoneState>) {
+    loop {
+        let state = phone_signal.wait().await;
+
+        AUDIO_BUFFERS.lock(|buffers| {
+            buffers.borrow_mut().set_a2dp(!state.is_active());
+        });
+    }
+}
 
 pub async fn process_outgoing<'d, O>(
     adc1: impl Peripheral<P = ADC1> + 'd,

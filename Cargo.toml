@@ -14,12 +14,13 @@ debug = true    # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [patch.crates-io]
+embedded-svc = { path = "../embedded-svc" }
 esp-idf-hal = { path = "../esp-idf-hal" }
 esp-idf-svc = { path = "../esp-idf-svc" }
 
 [dependencies]
-log = { version = "0.4.17" }
-esp-idf-svc = { version = "0.46", features = ["experimental", "critical-section", "embassy-sync", "embassy-time-driver", "edge-executor"] }
+log = "0.4.17"
+esp-idf-svc = { version = "0.46", features = ["nightly", "experimental", "critical-section", "embassy-sync", "embassy-time-driver", "edge-executor"] }
 heapless = "0.7"
 num_enum = { version = "0.7", default-features = false }
 enumset = { version = "1", default-features = false }

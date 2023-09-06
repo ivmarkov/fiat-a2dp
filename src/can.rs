@@ -1,3 +1,8 @@
+use core::future::Future;
+
+use embassy_futures::select::{select, select_slice, Either, select3, Either3};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+use enumset::EnumSet;
 use esp_idf_svc::{
     hal::{
         can::{AsyncCanDriver, CanConfig, Frame, OwnedAsyncCanDriver, CAN},
@@ -5,6 +10,12 @@ use esp_idf_svc::{
         peripheral::Peripheral,
     },
     sys::EspError,
+};
+
+use crate::state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal};
+
+use self::message::{
+    BodyComputer, Message, Proxi, Publisher, RadioSource, SteeringWheel, SteeringWheelButton, Topic,
 };
 
 pub mod message {
@@ -122,8 +133,8 @@ pub mod message {
     }
 
     pub struct Message<'a> {
-        publisher: Publisher,
-        topic: Topic<'a>,
+        pub publisher: Publisher,
+        pub topic: Topic<'a>,
     }
 
     impl<'a> From<&'a Frame> for Message<'a> {
@@ -559,7 +570,48 @@ pub mod message {
     }
 }
 
-pub async fn create<'d>(
+pub async fn process(
+    can: impl Peripheral<P = CAN>,
+    tx: impl Peripheral<P = impl OutputPin>,
+    rx: impl Peripheral<P = impl InputPin>,
+    bt_state: &StateSignal<BtState>,
+    audio_state: &StateSignal<AudioState>,
+    phone_state: &StateSignal<PhoneState>,
+    // display_signal: &StateSignal<DisplayState>,
+    radio_state: &StateSignal<RadioState>,
+    radio_signals: &[&StateSignal<RadioState>],
+    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+) -> Result<(), EspError> {
+    let driver = create(can, tx, rx)?;
+
+    let send_radio = &Signal::new();
+    let send_status = &Signal::new();
+    let send_proxi = &Signal::new();
+
+    let ret = select3(
+        process_signals(bt_state, audio_state, phone_state, radio_state, send_radio),
+        process_send(
+            &driver,
+            &[send_radio, send_proxi, send_status],
+        ),
+        process_recv(
+            &driver,
+            send_status,
+            send_proxi,
+            radio_signals,
+            buttons_signals,
+        ),
+    )
+    .await;
+
+    match ret {
+        Either3::First(ret) => ret,
+        Either3::Second(ret) => ret,
+        Either3::Third(ret) => ret,
+    }
+}
+
+fn create<'d>(
     can: impl Peripheral<P = CAN> + 'd,
     tx: impl Peripheral<P = impl OutputPin> + 'd,
     rx: impl Peripheral<P = impl InputPin> + 'd,
@@ -567,10 +619,128 @@ pub async fn create<'d>(
     AsyncCanDriver::new(can, tx, rx, &CanConfig::new())
 }
 
-pub async fn recv<'d>(driver: &OwnedAsyncCanDriver<'d>) -> Result<Frame, EspError> {
-    driver.receive().await
+async fn process_signals(
+    bt_state: &StateSignal<BtState>,
+    audio_state: &StateSignal<AudioState>,
+    phone_state: &StateSignal<PhoneState>,
+    radio_state: &StateSignal<RadioState>,
+    send_radio_signal: &Signal<NoopRawMutex, Frame>,
+) -> Result<(), EspError> {
+    todo!()
 }
 
-pub async fn send<'d>(driver: &OwnedAsyncCanDriver<'d>, frame: &Frame) -> Result<(), EspError> {
-    driver.transmit(frame).await
+async fn process_send<'d, const N: usize>(
+    driver: &OwnedAsyncCanDriver<'d>,
+    send_frames: &[&Signal<NoopRawMutex, Frame>; N],
+) -> Result<(), EspError> {
+    loop {
+        let mut array =
+            heapless::Vec::<_, N>::from_iter(send_frames.iter().map(|signal| signal.wait()));
+
+        let (frame, _) = select_slice(&mut array).await;
+
+        driver.transmit(&frame).await?;
+    }
+}
+
+async fn process_recv<'d>(
+    driver: &OwnedAsyncCanDriver<'d>,
+    send_status_signal: &Signal<NoopRawMutex, Frame>,
+    send_proxi_signal: &Signal<NoopRawMutex, Frame>,
+    radio_signals: &[&StateSignal<RadioState>],
+    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+) -> Result<(), EspError> {
+    let mut pending_proxi_request = false;
+    let mut pending_proxi_value = None;
+
+    loop {
+        let frame = driver.receive().await?;
+        let message: Message<'_> = (&frame).into();
+
+        match message.topic {
+            Topic::BodyComputer(payload) => process_recv_body_computer(payload, send_status_signal),
+            Topic::Proxi(payload) => process_recv_proxi(
+                payload,
+                &mut pending_proxi_request,
+                &mut pending_proxi_value,
+                send_proxi_signal,
+            ),
+            Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, buttons_signals),
+            Topic::RadioSource(payload) => process_recv_radio_source(payload, radio_signals),
+            _ => (),
+        }
+    }
+}
+
+fn process_recv_steering_wheel(
+    payload: SteeringWheel<'_>,
+    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+) {
+    match payload {
+        SteeringWheel::Buttons(buttons) => signal_all(buttons_signals, buttons),
+        _ => (),
+    }
+}
+
+fn process_recv_proxi(
+    payload: Proxi<'_>,
+    pending_proxi_request: &mut bool,
+    proxi_value: &mut Option<[u8; 8]>,
+    send_frame_signal: &Signal<NoopRawMutex, Frame>,
+) {
+    match payload {
+        Proxi::Request => {
+            if !*pending_proxi_request {
+                *pending_proxi_request = true;
+            }
+        }
+        Proxi::Response(pvr) => {
+            if proxi_value.is_none() {
+                let mut pv = [0; 8];
+                pv.copy_from_slice(pvr);
+
+                *proxi_value = Some(pv);
+            }
+        }
+        _ => (),
+    }
+
+    if *pending_proxi_request {
+        if let Some(proxi_value) = proxi_value.as_ref() {
+            send_frame_signal.signal(as_frame(Topic::Proxi(Proxi::Response(proxi_value))));
+            *pending_proxi_request = false;
+        }
+    }
+}
+
+fn process_recv_body_computer(payload: BodyComputer<'_>, send_frame_signal: &Signal<NoopRawMutex, Frame>) {
+    match payload {
+        BodyComputer::WakeupRequest => (),
+        BodyComputer::StatusRequest => todo!(),
+        BodyComputer::ShutDownRequest => todo!(),
+        BodyComputer::PoweringOn => todo!(),
+        BodyComputer::Active => todo!(),
+        BodyComputer::AboutToSleep => todo!(),
+        BodyComputer::Unknown(_) => todo!(),
+    }
+}
+
+fn process_recv_radio_source(payload: RadioSource<'_>, radio_signals: &[&StateSignal<RadioState>]) {
+    let state = match payload {
+        RadioSource::Fm(_) => RadioState::Fm,
+        RadioSource::BtPlaying => RadioState::BtActive,
+        RadioSource::BtMuted => RadioState::BtMuted,
+        RadioSource::Unknown(_) => RadioState::Unknown,
+    };
+
+    signal_all(radio_signals, state);
+}
+
+fn as_frame(topic: Topic<'_>) -> Frame {
+    let message = Message {
+        publisher: Publisher::Bt,
+        topic,
+    };
+
+    message.into()
 }
