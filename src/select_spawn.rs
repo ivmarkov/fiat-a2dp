@@ -1,7 +1,10 @@
-use core::{future::Future, pin::Pin, task::{Context, Poll}};
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use embassy_futures::select::{Either, select};
-
+use embassy_futures::select::{select, Either};
 
 pub struct SelectSpawn<F>(F);
 

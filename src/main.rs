@@ -58,7 +58,13 @@ fn main() -> Result<(), EspError> {
 
     executor
         .spawn_local_collect(
-            bt::process(modem, nvs, [], [], [phone_state_for_audio]),
+            bt::process(
+                modem,
+                nvs,
+                [bt_state_for_can],
+                [audio_state_for_can],
+                [phone_state_for_audio, phone_state_for_can],
+            ),
             &mut tasks,
         )
         .unwrap()
@@ -75,7 +81,17 @@ fn main() -> Result<(), EspError> {
         )
         .unwrap()
         .spawn_local_collect(
-            can::process(can, tx, rx, bt_state_for_can, audio_state_for_can, phone_state_for_can, radio_state_for_can, [radio_state_for_can], []), 
+            can::process(
+                can,
+                tx,
+                rx,
+                bt_state_for_can,
+                audio_state_for_can,
+                phone_state_for_can,
+                radio_state_for_can,
+                [radio_state_for_can],
+                [],
+            ),
             &mut tasks,
         )
         .unwrap();

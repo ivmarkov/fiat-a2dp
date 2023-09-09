@@ -15,7 +15,8 @@ use esp_idf_svc::{
 
 use crate::{
     audio,
-    state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal}, select_spawn::SelectSpawn,
+    select_spawn::SelectSpawn,
+    state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal},
 };
 
 use self::message::{
@@ -747,8 +748,7 @@ async fn process_display(
                     1
                 } else {
                     text_data.len() / 8 + (if text_data.len() % 8 > 0 { 1 } else { 0 })
-                }
-                - 1;
+                } - 1;
 
                 let topic = Topic::Display(Display::Text {
                     for_radio,
