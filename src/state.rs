@@ -43,6 +43,13 @@ impl AudioState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Playing(_) | Self::Paused(_))
     }
+
+    pub fn track_info(&self) -> Option<&TrackInfo> {
+        match self {
+            Self::Playing(track_info) | Self::Paused(track_info) => Some(track_info),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -82,15 +89,11 @@ pub enum RadioState {
     BtMuted,
 }
 
-// impl RadioState {
-//     pub fn is_connected(&self) -> bool {
-//         matches!(self, Self::Connected) || self.is_active()
-//     }
-
-//     pub fn is_bt_active(&self) -> bool {
-//         matches!(self, Self::Dialing(_) | Self::Ringing(_) | Self::CallActive(_))
-//     }
-// }
+impl RadioState {
+    pub fn is_bt_active(&self) -> bool {
+        matches!(self, Self::BtActive)
+    }
+}
 
 pub type StateSignal<T> = Signal<EspRawMutex, T>;
 

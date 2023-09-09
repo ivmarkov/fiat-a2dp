@@ -1,7 +1,8 @@
-use core::future::Future;
+use core::cmp::min;
 
-use embassy_futures::select::{select, select_slice, Either, select3, Either3};
+use embassy_futures::select::{select, select4, select_slice, Either, Either4};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+use embassy_time::{Duration, Timer};
 use enumset::EnumSet;
 use esp_idf_svc::{
     hal::{
@@ -12,10 +13,14 @@ use esp_idf_svc::{
     sys::EspError,
 };
 
-use crate::state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal};
+use crate::{
+    audio,
+    state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal}, select_spawn::SelectSpawn,
+};
 
 use self::message::{
-    BodyComputer, Message, Proxi, Publisher, RadioSource, SteeringWheel, SteeringWheelButton, Topic,
+    BodyComputer, Bt, Display, Message, Proxi, Publisher, RadioSource, SteeringWheel,
+    SteeringWheelButton, Topic,
 };
 
 pub mod message {
@@ -40,7 +45,7 @@ pub mod message {
     const TOPIC_RADIO_STATION: u16 = 0xa19;
     const TOPIC_RADIO_SOURCE: u16 = 0xa11;
 
-    const CHAR_MAP: &str = "0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZ%% %ij%%%%%_%?!+-:/#*";
+    const CHAR_MAP: &str = "0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZ%% %ij%%%%%_%?!+-:/#*;";
 
     pub type FramePayload = heapless::Vec<u8, 8>;
     pub type DisplayString = heapless::String<12>;
@@ -570,7 +575,7 @@ pub mod message {
     }
 }
 
-pub async fn process(
+pub async fn process<const RN: usize, const BN: usize>(
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
@@ -579,36 +584,52 @@ pub async fn process(
     phone_state: &StateSignal<PhoneState>,
     // display_signal: &StateSignal<DisplayState>,
     radio_state: &StateSignal<RadioState>,
-    radio_signals: &[&StateSignal<RadioState>],
-    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+    radio_signals: [&StateSignal<RadioState>; RN],
+    buttons_signals: [&StateSignal<EnumSet<SteeringWheelButton>>; BN],
 ) -> Result<(), EspError> {
     let driver = create(can, tx, rx)?;
 
-    let send_radio = &Signal::new();
-    let send_status = &Signal::new();
+    let send_radio_switch = &Signal::new();
+    let send_radio_display = &Signal::new();
+    let send_cockpit_display = &Signal::new();
     let send_proxi = &Signal::new();
+    let send_status = &Signal::new();
 
-    let ret = select3(
-        process_signals(bt_state, audio_state, phone_state, radio_state, send_radio),
-        process_send(
-            &driver,
-            &[send_radio, send_proxi, send_status],
-        ),
-        process_recv(
-            &driver,
-            send_status,
+    let radio_text_state = &Signal::new();
+    let cockpit_text_state = &Signal::new();
+
+    SelectSpawn::run(process_radio(
+        bt_state,
+        audio_state,
+        phone_state,
+        radio_state,
+        send_radio_switch,
+        radio_text_state,
+    ))
+    .chain(process_display(radio_text_state, true, send_radio_display))
+    .chain(process_display(
+        cockpit_text_state,
+        false,
+        send_cockpit_display,
+    ))
+    .chain(process_send(
+        &driver,
+        &[
+            send_radio_switch,
+            send_radio_display,
+            send_cockpit_display,
             send_proxi,
-            radio_signals,
-            buttons_signals,
-        ),
-    )
-    .await;
-
-    match ret {
-        Either3::First(ret) => ret,
-        Either3::Second(ret) => ret,
-        Either3::Third(ret) => ret,
-    }
+            send_status,
+        ],
+    ))
+    .chain(process_recv(
+        &driver,
+        send_status,
+        send_proxi,
+        &radio_signals,
+        &buttons_signals,
+    ))
+    .await
 }
 
 fn create<'d>(
@@ -619,14 +640,131 @@ fn create<'d>(
     AsyncCanDriver::new(can, tx, rx, &CanConfig::new())
 }
 
-async fn process_signals(
+async fn process_radio(
     bt_state: &StateSignal<BtState>,
     audio_state: &StateSignal<AudioState>,
     phone_state: &StateSignal<PhoneState>,
     radio_state: &StateSignal<RadioState>,
-    send_radio_signal: &Signal<NoopRawMutex, Frame>,
+    send_radio_switch_signal: &Signal<NoopRawMutex, Frame>,
+    send_radio_display_signal: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
 ) -> Result<(), EspError> {
-    todo!()
+    let mut radio = RadioState::Unknown;
+    let mut bt = BtState::Uninitialized;
+    let mut audio = AudioState::Uninitialized;
+    let mut phone = PhoneState::Uninitialized;
+
+    let switch_state = |audio: &AudioState, phone: &PhoneState| {
+        let topic = if phone.is_active() {
+            Topic::Bt(Bt::Phone)
+        } else if audio.is_active() {
+            Topic::Bt(Bt::Media)
+        } else {
+            Topic::Bt(Bt::Mute)
+        };
+
+        send_radio_display_signal.signal(None);
+        send_radio_switch_signal.signal(as_frame(topic));
+    };
+
+    loop {
+        let ret = select4(
+            bt_state.wait(),
+            audio_state.wait(),
+            phone_state.wait(),
+            radio_state.wait(),
+        )
+        .await;
+
+        match ret {
+            Either4::First(new) => {
+                bt = new;
+            }
+            Either4::Second(new) => {
+                let switch = audio.is_active() != new.is_active();
+
+                audio = new;
+
+                if switch {
+                    switch_state(&audio, &phone);
+                }
+            }
+            Either4::Third(new) => {
+                let switch = phone.is_active() != phone.is_active();
+
+                phone = new;
+
+                if switch {
+                    switch_state(&audio, &phone);
+                }
+            }
+            Either4::Fourth(new) => {
+                radio = new;
+            }
+        }
+
+        if radio.is_bt_active() {
+            if phone.is_active() {
+                // TODO: Send phone state (calling etc.)
+            } else if audio.is_active() {
+                if let Some(track_info) = audio.track_info() {
+                    send_radio_display_signal.signal(Some("".into()) /* TODO */);
+                }
+            }
+        }
+    }
+}
+
+async fn process_display(
+    text_state: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
+    for_radio: bool,
+    send_display: &Signal<NoopRawMutex, Frame>,
+) -> Result<(), EspError> {
+    let mut text = None;
+    let mut offset = 0;
+
+    loop {
+        match select(text_state.wait(), Timer::after(Duration::from_millis(10))).await {
+            Either::First(text_data) => {
+                if let Some(text_data) = text_data {
+                    text = Some(text_data);
+                    offset = 0;
+                } else {
+                    text = None;
+                }
+            }
+            Either::Second(_) => {
+                if text.is_some() {
+                    offset += 8;
+                }
+            }
+        }
+
+        if let Some(text_data) = &text {
+            if !send_display.signaled() {
+                let chunk_payload = &text_data[offset..min(offset + 8, text_data.len())];
+                let chunk = offset / 8;
+                let total_chunks = if text_data.is_empty() {
+                    1
+                } else {
+                    text_data.len() / 8 + (if text_data.len() % 8 > 0 { 1 } else { 0 })
+                }
+                - 1;
+
+                let topic = Topic::Display(Display::Text {
+                    for_radio,
+                    text: chunk_payload.into(),
+                    chunk,
+                    total_chunks,
+                });
+
+                send_display.signal(as_frame(topic));
+
+                if chunk == total_chunks {
+                    text = None;
+                }
+            }
+        }
+    }
 }
 
 async fn process_send<'d, const N: usize>(
@@ -713,7 +851,10 @@ fn process_recv_proxi(
     }
 }
 
-fn process_recv_body_computer(payload: BodyComputer<'_>, send_frame_signal: &Signal<NoopRawMutex, Frame>) {
+fn process_recv_body_computer(
+    payload: BodyComputer<'_>,
+    send_frame_signal: &Signal<NoopRawMutex, Frame>,
+) {
     match payload {
         BodyComputer::WakeupRequest => (),
         BodyComputer::StatusRequest => todo!(),

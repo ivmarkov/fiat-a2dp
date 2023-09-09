@@ -23,12 +23,12 @@ use log::*;
 use crate::audio::AUDIO_BUFFERS;
 use crate::state::{signal_all, AudioState, BtState, PhoneState, StateSignal};
 
-pub async fn process<'d>(
+pub async fn process<'d, const BN: usize, const AN: usize, const PN: usize>(
     modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
     nvs: EspDefaultNvsPartition,
-    bt_signals: &[&StateSignal<BtState>],
-    audio_signals: &[&StateSignal<AudioState>],
-    phone_signals: &[&StateSignal<PhoneState>],
+    bt_signals: [&StateSignal<BtState>; BN],
+    audio_signals: [&StateSignal<AudioState>; AN],
+    phone_signals: [&StateSignal<PhoneState>; PN],
 ) -> Result<(), EspError> {
     let bt = BtDriver::<BtClassic>::new(modem, Some(nvs))?;
 
@@ -52,7 +52,7 @@ pub async fn process<'d>(
 
     info!("HFPC created");
 
-    gap.initialize(|event| handle_gap(&gap, bt_signals, event))?;
+    gap.initialize(|event| handle_gap(&gap, &bt_signals, event))?;
 
     gap.set_cod(
         Cod::new(
@@ -73,11 +73,11 @@ pub async fn process<'d>(
 
     info!("AVRCC initialized");
 
-    a2dp.initialize(|event| handle_a2dp(&a2dp, audio_signals, event))?;
+    a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_signals, event))?;
 
     info!("A2DP initialized");
 
-    hfpc.initialize(|event| handle_hfpc(&hfpc, phone_signals, event))?;
+    hfpc.initialize(|event| handle_hfpc(&hfpc, &phone_signals, event))?;
 
     info!("HFPC initialized");
 

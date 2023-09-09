@@ -125,9 +125,9 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
-pub async fn process_signals(phone_signal: &StateSignal<PhoneState>) {
+pub async fn process_state(phone_state: &StateSignal<PhoneState>) -> Result<(), EspError> {
     loop {
-        let state = phone_signal.wait().await;
+        let state = phone_state.wait().await;
 
         AUDIO_BUFFERS.lock(|buffers| {
             buffers.borrow_mut().set_a2dp(!state.is_active());
