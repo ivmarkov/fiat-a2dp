@@ -903,9 +903,9 @@ fn process_recv_body_computer(
             let started = get_started_services(started_services);
             let shutdown = *shutdown_request;
 
-            let report_state = if !shutdown && started == EnumSet::ALL {
+            let report_state = if !shutdown && started | Service::Can == EnumSet::ALL {
                 BodyComputer::Active
-            } else if shutdown && started == EnumSet::EMPTY {
+            } else if shutdown && started & Service::Can == EnumSet::EMPTY {
                 BodyComputer::AboutToSleep
             } else {
                 BodyComputer::PoweringOn
