@@ -4,7 +4,10 @@ use core::cmp::min;
 use embassy_futures::select::{select, select4, select_slice, Either, Either4};
 
 use embassy_sync::{
-    blocking_mutex::{raw::NoopRawMutex, Mutex},
+    blocking_mutex::{
+        raw::{NoopRawMutex, RawMutex},
+        Mutex,
+    },
     signal::Signal,
 };
 
@@ -26,7 +29,7 @@ use log::info;
 use crate::{
     select_spawn::SelectSpawn,
     start::get_started_services,
-    state::{signal_all, AudioState, BtState, PhoneState, RadioState, Service, StateSignal},
+    state::{AudioState, BtState, PhoneState, RadioState, Receiver, Sender, Service},
 };
 
 use self::message::{
@@ -586,19 +589,19 @@ pub mod message {
     }
 }
 
-pub async fn process<const SN: usize, const RN: usize, const BN: usize>(
+pub async fn process(
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
+    start: Sender<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    bt_state: &StateSignal<BtState>,
-    audio_state: &StateSignal<AudioState>,
-    phone_state: &StateSignal<PhoneState>,
+    bt: Receiver<'_, impl RawMutex, BtState>,
+    audio: Receiver<'_, impl RawMutex, AudioState>,
+    phone: Receiver<'_, impl RawMutex, PhoneState>,
     // display_signal: &StateSignal<DisplayState>,
-    radio_state: &StateSignal<RadioState>,
-    start_state_signals: [&Signal<NoopRawMutex, bool>; SN],
-    radio_signals: [&StateSignal<RadioState>; RN],
-    buttons_signals: [&StateSignal<EnumSet<SteeringWheelButton>>; BN],
+    radio: Receiver<'_, impl RawMutex, RadioState>,
+    radio_out: Sender<'_, impl RawMutex, RadioState>,
+    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), EspError> {
     info!("Starting service CAN");
 
@@ -619,10 +622,10 @@ pub async fn process<const SN: usize, const RN: usize, const BN: usize>(
 
     let res = SelectSpawn::run(core::future::pending())
         .chain(process_radio(
-            bt_state,
-            audio_state,
-            phone_state,
-            radio_state,
+            bt,
+            audio,
+            phone,
+            radio,
             send_radio_switch,
             radio_text_state,
         ))
@@ -644,12 +647,12 @@ pub async fn process<const SN: usize, const RN: usize, const BN: usize>(
         ))
         .chain(process_recv(
             &driver,
+            start,
             started_services,
             send_status,
             send_proxi,
-            &start_state_signals,
-            &radio_signals,
-            &buttons_signals,
+            radio_out,
+            buttons,
         ))
         .await;
 
@@ -669,17 +672,17 @@ fn create<'d>(
 }
 
 async fn process_radio(
-    bt_state: &StateSignal<BtState>,
-    audio_state: &StateSignal<AudioState>,
-    phone_state: &StateSignal<PhoneState>,
-    radio_state: &StateSignal<RadioState>,
-    send_radio_switch_signal: &Signal<NoopRawMutex, Frame>,
-    send_radio_display_signal: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
+    bt: Receiver<'_, impl RawMutex, BtState>,
+    audio: Receiver<'_, impl RawMutex, AudioState>,
+    phone: Receiver<'_, impl RawMutex, PhoneState>,
+    radio: Receiver<'_, impl RawMutex, RadioState>,
+    radio_switch_out: &Signal<NoopRawMutex, Frame>,
+    radio_display_out: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
 ) -> Result<(), EspError> {
-    let mut radio = RadioState::Unknown;
-    let mut bt = BtState::Uninitialized;
-    let mut audio = AudioState::Uninitialized;
-    let mut phone = PhoneState::Uninitialized;
+    let mut sradio = RadioState::Unknown;
+    let mut sbt = BtState::Uninitialized;
+    let mut saudio = AudioState::Uninitialized;
+    let mut sphone = PhoneState::Uninitialized;
 
     let switch_state = |audio: &AudioState, phone: &PhoneState| {
         let topic = if phone.is_active() {
@@ -690,52 +693,46 @@ async fn process_radio(
             Topic::Bt(Bt::Mute)
         };
 
-        send_radio_display_signal.signal(None);
-        send_radio_switch_signal.signal(as_frame(topic));
+        radio_display_out.signal(None);
+        radio_switch_out.signal(as_frame(topic));
     };
 
     loop {
-        let ret = select4(
-            bt_state.wait(),
-            audio_state.wait(),
-            phone_state.wait(),
-            radio_state.wait(),
-        )
-        .await;
+        let ret = select4(bt.recv(), audio.recv(), phone.recv(), radio.recv()).await;
 
         match ret {
             Either4::First(new) => {
-                bt = new;
+                sbt = new;
             }
             Either4::Second(new) => {
-                let switch = audio.is_active() != new.is_active();
+                let switch = saudio.is_active() != new.is_active();
 
-                audio = new;
+                saudio = new;
 
                 if switch {
-                    switch_state(&audio, &phone);
+                    switch_state(&saudio, &sphone);
                 }
             }
             Either4::Third(new) => {
-                let switch = phone.is_active() != phone.is_active();
+                let switch = sphone.is_active() != sphone.is_active();
 
-                phone = new;
+                sphone = new;
 
                 if switch {
-                    switch_state(&audio, &phone);
+                    switch_state(&saudio, &sphone);
                 }
             }
             Either4::Fourth(new) => {
-                radio = new;
+                sradio = new;
             }
         }
 
-        if radio.is_bt_active() {
-            if phone.is_active() {
+        if sradio.is_bt_active() {
+            if sphone.is_active() {
                 // TODO: Send phone state (calling etc.)
-            } else if audio.is_active() {
-                if let Some(track_info) = audio.track_info() {
-                    send_radio_display_signal.signal(Some("".into()) /* TODO */);
+            } else if saudio.is_active() {
+                if let Some(track_info) = saudio.track_info() {
+                    radio_display_out.signal(Some("".into()) /* TODO */);
                 }
             }
         }
@@ -743,32 +740,32 @@ async fn process_radio(
 }
 
 async fn process_display(
-    text_state: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
+    text: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
     for_radio: bool,
-    send_display: &Signal<NoopRawMutex, Frame>,
+    display_out: &Signal<NoopRawMutex, Frame>,
 ) -> Result<(), EspError> {
-    let mut text = None;
+    let mut stext = None;
     let mut offset = 0;
 
     loop {
-        match select(text_state.wait(), Timer::after(Duration::from_millis(10))).await {
+        match select(text.wait(), Timer::after(Duration::from_millis(10))).await {
             Either::First(text_data) => {
                 if let Some(text_data) = text_data {
-                    text = Some(text_data);
+                    stext = Some(text_data);
                     offset = 0;
                 } else {
-                    text = None;
+                    stext = None;
                 }
             }
             Either::Second(_) => {
-                if text.is_some() {
+                if stext.is_some() {
                     offset += 8;
                 }
             }
         }
 
-        if let Some(text_data) = &text {
-            if !send_display.signaled() {
+        if let Some(text_data) = &stext {
+            if !display_out.signaled() {
                 let chunk_payload = &text_data[offset..min(offset + 8, text_data.len())];
                 let chunk = offset / 8;
                 let total_chunks = if text_data.is_empty() {
@@ -784,10 +781,10 @@ async fn process_display(
                     total_chunks,
                 });
 
-                send_display.signal(as_frame(topic));
+                display_out.signal(as_frame(topic));
 
                 if chunk == total_chunks {
-                    text = None;
+                    stext = None;
                 }
             }
         }
@@ -796,11 +793,10 @@ async fn process_display(
 
 async fn process_send<'d, const N: usize>(
     driver: &OwnedAsyncCanDriver<'d>,
-    send_frames: &[&Signal<NoopRawMutex, Frame>; N],
+    frames: &[&Signal<NoopRawMutex, Frame>; N],
 ) -> Result<(), EspError> {
     loop {
-        let mut array =
-            heapless::Vec::<_, N>::from_iter(send_frames.iter().map(|signal| signal.wait()));
+        let mut array = heapless::Vec::<_, N>::from_iter(frames.iter().map(|signal| signal.wait()));
 
         let (frame, _) = select_slice(&mut array).await;
 
@@ -810,12 +806,12 @@ async fn process_send<'d, const N: usize>(
 
 async fn process_recv<'d>(
     driver: &OwnedAsyncCanDriver<'d>,
+    start: Sender<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    send_status_signal: &Signal<NoopRawMutex, Frame>,
-    send_proxi_signal: &Signal<NoopRawMutex, Frame>,
-    start_state_signals: &[&Signal<NoopRawMutex, bool>],
-    radio_signals: &[&StateSignal<RadioState>],
-    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+    status_out: &Signal<NoopRawMutex, Frame>,
+    proxi_out: &Signal<NoopRawMutex, Frame>,
+    radio: Sender<'_, impl RawMutex, RadioState>,
+    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), EspError> {
     let mut shutdown_request = false;
     let mut pending_proxi_request = false;
@@ -828,19 +824,19 @@ async fn process_recv<'d>(
         match message.topic {
             Topic::BodyComputer(payload) => process_recv_body_computer(
                 payload,
+                &start,
                 started_services,
                 &mut shutdown_request,
-                send_status_signal,
-                start_state_signals,
+                status_out,
             ),
             Topic::Proxi(payload) => process_recv_proxi(
                 payload,
                 &mut pending_proxi_request,
                 &mut pending_proxi_value,
-                send_proxi_signal,
+                proxi_out,
             ),
-            Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, buttons_signals),
-            Topic::RadioSource(payload) => process_recv_radio_source(payload, radio_signals),
+            Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, &buttons),
+            Topic::RadioSource(payload) => process_recv_radio_source(payload, &radio),
             _ => (),
         }
     }
@@ -848,10 +844,10 @@ async fn process_recv<'d>(
 
 fn process_recv_steering_wheel(
     payload: SteeringWheel<'_>,
-    buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
+    buttons: &Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) {
     match payload {
-        SteeringWheel::Buttons(buttons) => signal_all(buttons_signals, buttons),
+        SteeringWheel::Buttons(state) => buttons.send(state),
         _ => (),
     }
 }
@@ -860,7 +856,7 @@ fn process_recv_proxi(
     payload: Proxi<'_>,
     pending_proxi_request: &mut bool,
     proxi_value: &mut Option<[u8; 8]>,
-    send_frame_signal: &Signal<NoopRawMutex, Frame>,
+    proxi_out: &Signal<NoopRawMutex, Frame>,
 ) {
     match payload {
         Proxi::Request => {
@@ -881,7 +877,7 @@ fn process_recv_proxi(
 
     if *pending_proxi_request {
         if let Some(proxi_value) = proxi_value.as_ref() {
-            send_frame_signal.signal(as_frame(Topic::Proxi(Proxi::Response(proxi_value))));
+            proxi_out.signal(as_frame(Topic::Proxi(Proxi::Response(proxi_value))));
             *pending_proxi_request = false;
         }
     }
@@ -889,19 +885,19 @@ fn process_recv_proxi(
 
 fn process_recv_body_computer(
     payload: BodyComputer<'_>,
+    start: &Sender<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     shutdown_request: &mut bool,
-    send_frame_signal: &Signal<NoopRawMutex, Frame>,
-    start_state_signals: &[&Signal<NoopRawMutex, bool>],
+    status_out: &Signal<NoopRawMutex, Frame>,
 ) {
     match payload {
         BodyComputer::WakeupRequest => {
             *shutdown_request = false;
-            signal_all(start_state_signals, true);
+            start.send(true);
         }
         BodyComputer::ShutDownRequest => {
             *shutdown_request = true;
-            signal_all(start_state_signals, false);
+            start.send(false);
         }
         BodyComputer::StatusRequest => {
             let started = get_started_services(started_services);
@@ -915,13 +911,16 @@ fn process_recv_body_computer(
                 BodyComputer::PoweringOn
             };
 
-            send_frame_signal.signal(as_frame(Topic::BodyComputer(report_state)));
+            status_out.signal(as_frame(Topic::BodyComputer(report_state)));
         }
         _ => (),
     }
 }
 
-fn process_recv_radio_source(payload: RadioSource<'_>, radio_signals: &[&StateSignal<RadioState>]) {
+fn process_recv_radio_source(
+    payload: RadioSource<'_>,
+    radio: &Sender<'_, impl RawMutex, RadioState>,
+) {
     let state = match payload {
         RadioSource::Fm(_) => RadioState::Fm,
         RadioSource::BtPlaying => RadioState::BtActive,
@@ -929,7 +928,7 @@ fn process_recv_radio_source(payload: RadioSource<'_>, radio_signals: &[&StateSi
         RadioSource::Unknown(_) => RadioState::Unknown,
     };
 
-    signal_all(radio_signals, state);
+    radio.send(state);
 }
 
 fn as_frame(topic: Topic<'_>) -> Frame {

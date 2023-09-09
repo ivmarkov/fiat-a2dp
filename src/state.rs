@@ -1,6 +1,6 @@
 use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
-use enumset::{EnumSet, EnumSetType};
-use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
+
+use enumset::EnumSetType;
 
 pub type DisplayString = heapless::String<32>;
 
@@ -98,20 +98,64 @@ impl RadioState {
 
 #[derive(Debug, EnumSetType)]
 pub enum Service {
-    Bt,
-    AudioIncoming,
+    Can,
     AudioOutgoing,
+    AudioIncoming,
     AudioState,
+    Bt,
 }
 
-pub type StateSignal<T> = Signal<EspRawMutex, T>;
+pub struct State<M, T>([Signal<M, T>; 4])
+where
+    M: RawMutex;
 
-pub fn signal_all<M, T>(signals: &[&Signal<M, T>], data: T)
+impl<M, T> State<M, T>
 where
     M: RawMutex,
-    T: Clone + Send,
 {
-    for signal in signals {
-        signal.signal(data.clone());
+    const INIT: Signal<M, T> = Signal::new();
+
+    pub const fn new() -> Self {
+        Self([Self::INIT; 4])
+    }
+
+    pub fn receiver(&self, service: Service) -> Receiver<'_, M, T> {
+        let index = service as usize;
+
+        Receiver(&self.0[index])
+    }
+
+    pub fn sender(&self) -> Sender<'_, M, T> {
+        Sender(&self.0)
+    }
+}
+
+pub struct Receiver<'a, M, T>(&'a Signal<M, T>)
+where
+    M: RawMutex;
+
+impl<'a, M, T> Receiver<'a, M, T>
+where
+    M: RawMutex,
+    T: Send,
+{
+    pub async fn recv(&self) -> T {
+        self.0.wait().await
+    }
+}
+
+pub struct Sender<'a, M, T>(&'a [Signal<M, T>])
+where
+    M: RawMutex;
+
+impl<'a, M, T> Sender<'a, M, T>
+where
+    M: RawMutex,
+    T: Send + Clone,
+{
+    pub fn send(&self, value: T) {
+        for signal in self.0 {
+            signal.signal(value.clone());
+        }
     }
 }

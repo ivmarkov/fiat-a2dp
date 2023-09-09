@@ -2,7 +2,7 @@ use core::cell::{Cell, RefCell};
 
 use embassy_futures::select::{select, Either};
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
 
 use enumset::EnumSet;
@@ -30,7 +30,7 @@ use log::info;
 use crate::ringbuf::RingBuf;
 use crate::select_spawn::SelectSpawn;
 use crate::start::{set_service_started, wait_start};
-use crate::state::{PhoneState, Service, StateSignal};
+use crate::state::{PhoneState, Receiver, Service};
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -134,8 +134,8 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
 pub async fn process_state(
-    phone_state: &StateSignal<PhoneState>,
-    start_state: &Signal<NoopRawMutex, bool>,
+    phone: Receiver<'_, impl RawMutex, PhoneState>,
+    start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
 ) -> Result<(), EspError> {
     loop {
@@ -144,7 +144,7 @@ pub async fn process_state(
         set_service_started(started_services, Service::AudioState, true);
 
         loop {
-            let state = select(wait_start(start_state, false), phone_state.wait()).await;
+            let state = select(wait_start(&start, false), phone.recv()).await;
 
             match state {
                 Either::First(other) => break other,
@@ -157,17 +157,17 @@ pub async fn process_state(
         }?;
 
         set_service_started(started_services, Service::AudioState, false);
-        wait_start(start_state, true).await?;
+        wait_start(&start, true).await?;
     }
 }
 
-pub async fn process_outgoing<'d>(
-    mut adc1: impl Peripheral<P = ADC1> + 'd,
-    mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>> + 'd,
-    mut i2s0: impl Peripheral<P = I2S0> + 'd,
+pub async fn process_outgoing(
+    mut adc1: impl Peripheral<P = ADC1>,
+    mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>>,
+    mut i2s0: impl Peripheral<P = I2S0>,
     buf: &mut [AdcMeasurement],
     notify_outgoing: impl Fn(),
-    start_state: &Signal<NoopRawMutex, bool>,
+    start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
 ) -> Result<(), EspError> {
     loop {
@@ -188,7 +188,7 @@ pub async fn process_outgoing<'d>(
 
             set_service_started(started_services, Service::AudioOutgoing, true);
 
-            let res = SelectSpawn::run(wait_start(start_state, false))
+            let res = SelectSpawn::run(wait_start(&start, false))
                 .chain(process_outgoing_read(&mut driver, buf, &notify_outgoing))
                 .await;
 
@@ -198,7 +198,7 @@ pub async fn process_outgoing<'d>(
         }
 
         set_service_started(started_services, Service::AudioOutgoing, false);
-        wait_start(start_state, true).await?;
+        wait_start(&start, true).await?;
     }
 }
 
@@ -262,7 +262,7 @@ pub async fn process_incoming(
     mut dout: impl Peripheral<P = impl OutputPin>,
     mut ws: impl Peripheral<P = impl InputPin + OutputPin>,
     buf: &mut [u8],
-    start_state: &Signal<NoopRawMutex, bool>,
+    start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
 ) -> Result<(), EspError> {
     loop {
@@ -281,7 +281,7 @@ pub async fn process_incoming(
                 set_service_started(started_services, Service::AudioIncoming, true);
 
                 let res = select(
-                    wait_start(start_state, false),
+                    wait_start(&start, false),
                     process_incoming_read(&mut driver, buf, &mut a2dp_conf),
                 )
                 .await;
@@ -296,7 +296,7 @@ pub async fn process_incoming(
         }
 
         set_service_started(started_services, Service::AudioIncoming, false);
-        wait_start(start_state, true).await?;
+        wait_start(&start, true).await?;
     }
 }
 
@@ -339,7 +339,7 @@ fn i2s_create<'a>(
     ws: impl Peripheral<P = impl InputPin + OutputPin> + 'a,
     a2dp: bool,
 ) -> Result<I2sDriver<'a, I2sTx>, EspError> {
-    let mut driver = I2sDriver::new_std_tx(
+    I2sDriver::new_std_tx(
         i2s,
         &StdConfig::new(
             Config::new().auto_clear(true),
@@ -355,9 +355,7 @@ fn i2s_create<'a>(
         dout,
         AnyIOPin::none(),
         ws,
-    )?;
-
-    Ok(driver)
+    )
 }
 
 fn as_u8_slice(slice: &[u16]) -> &[u8] {

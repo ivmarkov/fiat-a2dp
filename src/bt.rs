@@ -1,13 +1,13 @@
 use core::cell::Cell;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::signal::Signal;
 
 use enumset::EnumSet;
 
 use esp_idf_svc::bt::a2dp::ConnectionStatus;
 use esp_idf_svc::bt::hfp::client;
+use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::{
     bt::{
@@ -31,42 +31,42 @@ use log::*;
 use crate::audio::AUDIO_BUFFERS;
 
 use crate::start::{set_service_started, wait_start};
-use crate::state::{signal_all, AudioState, BtState, PhoneState, Service, StateSignal};
+use crate::state::{AudioState, BtState, PhoneState, Receiver, Sender, Service};
 
-pub async fn process<'d, const BN: usize, const AN: usize, const PN: usize>(
-    mut modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
+pub async fn process(
+    mut modem: impl Peripheral<P = impl BluetoothModemPeripheral>,
     nvs: EspDefaultNvsPartition,
-    start_state: &Signal<NoopRawMutex, bool>,
+    start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    bt_signals: [&StateSignal<BtState>; BN],
-    audio_signals: [&StateSignal<AudioState>; AN],
-    phone_signals: [&StateSignal<PhoneState>; PN],
+    bt: Sender<'_, EspRawMutex, BtState>,
+    audio: Sender<'_, EspRawMutex, AudioState>,
+    phone: Sender<'_, EspRawMutex, PhoneState>,
 ) -> Result<(), EspError> {
     loop {
         {
-            let bt = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
+            let driver = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
 
-            bt.set_device_name("Fiat")?;
+            driver.set_device_name("Fiat")?;
 
             info!("Bluetooth initialized");
 
-            let gap = EspGap::new(&bt)?;
+            let gap = EspGap::new(&driver)?;
 
             info!("GAP created");
 
-            let avrcc = EspAvrcc::new(&bt)?;
+            let avrcc = EspAvrcc::new(&driver)?;
 
             info!("AVRCC created");
 
-            let a2dp = EspA2dp::new_sink(&bt)?;
+            let a2dp = EspA2dp::new_sink(&driver)?;
 
             info!("A2DP created");
 
-            let hfpc = EspHfpc::new(&bt, None)?;
+            let hfpc = EspHfpc::new(&driver, None)?;
 
             info!("HFPC created");
 
-            gap.initialize(|event| handle_gap(&gap, &bt_signals, event))?;
+            gap.initialize(|event| handle_gap(&gap, &bt, event))?;
 
             gap.set_cod(
                 Cod::new(
@@ -83,32 +83,32 @@ pub async fn process<'d, const BN: usize, const AN: usize, const PN: usize>(
 
             info!("GAP initialized");
 
-            avrcc.initialize(|event| handle_avrcc(&avrcc, event))?;
+            avrcc.initialize(|event| handle_avrcc(&avrcc, &audio, event))?;
 
             info!("AVRCC initialized");
 
-            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_signals, event))?;
+            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio, event))?;
 
             info!("A2DP initialized");
 
-            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone_signals, event))?;
+            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone, event))?;
 
             info!("HFPC initialized");
 
             a2dp.set_delay(core::time::Duration::from_millis(150))?;
 
             set_service_started(started_services, Service::Bt, true);
-            wait_start(start_state, false).await?;
+            wait_start(&start, false).await?;
         }
 
         set_service_started(started_services, Service::Bt, false);
-        wait_start(start_state, true).await?;
+        wait_start(&start, true).await?;
     }
 }
 
 fn handle_gap<'d, M>(
     gap: &EspGap<'d, M, &BtDriver<'d, M>>,
-    signals: &[&StateSignal<BtState>],
+    bt: &Sender<'_, impl RawMutex, BtState>,
     event: GapEvent<'_>,
 ) where
     M: BtClassicEnabled,
@@ -132,17 +132,17 @@ fn handle_gap<'d, M>(
 
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
-    signals: &[&StateSignal<AudioState>],
+    audio: &Sender<'_, impl RawMutex, AudioState>,
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
 {
     match event {
-        A2dpEvent::Initialized => signal_all(signals, AudioState::Initialized),
-        A2dpEvent::Deinitialized => signal_all(signals, AudioState::Uninitialized),
+        A2dpEvent::Initialized => audio.send(AudioState::Initialized),
+        A2dpEvent::Deinitialized => audio.send(AudioState::Uninitialized),
         A2dpEvent::ConnectionState { status, .. } => match status {
-            ConnectionStatus::Connected => signal_all(signals, AudioState::Connected),
-            ConnectionStatus::Disconnected => signal_all(signals, AudioState::Initialized),
+            ConnectionStatus::Connected => audio.send(AudioState::Connected),
+            ConnectionStatus::Disconnected => audio.send(AudioState::Initialized),
             _ => (),
         },
         A2dpEvent::SinkData(data) => {
@@ -158,7 +158,7 @@ fn handle_a2dp<'d, M>(
 
 fn handle_hfpc<'d, M>(
     hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
-    signals: &[&StateSignal<PhoneState>],
+    phone: &Sender<'_, impl RawMutex, PhoneState>,
     event: HfpcEvent<'_>,
 ) -> usize
 where
@@ -167,11 +167,9 @@ where
     match event {
         HfpcEvent::ConnectionState { status, .. } => {
             match status {
-                client::ConnectionStatus::Disconnected => {
-                    signal_all(signals, PhoneState::Initialized)
-                }
+                client::ConnectionStatus::Disconnected => phone.send(PhoneState::Initialized),
                 client::ConnectionStatus::Connected | client::ConnectionStatus::SlcConnected => {
-                    signal_all(signals, PhoneState::Connected)
+                    phone.send(PhoneState::Connected)
                 }
                 _ => (),
             }
@@ -208,8 +206,11 @@ where
     }
 }
 
-fn handle_avrcc<'d, M>(avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>, event: AvrccEvent<'_>)
-where
+fn handle_avrcc<'d, M>(
+    avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
+    audio: &Sender<'_, impl RawMutex, AudioState>,
+    event: AvrccEvent<'_>,
+) where
     M: BtClassicEnabled,
 {
     match &event {

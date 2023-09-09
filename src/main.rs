@@ -2,17 +2,18 @@
 
 use core::cell::Cell;
 
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::signal::Signal;
 
 use enumset::EnumSet;
 
 use esp_idf_svc::hal::sys::EspError;
+use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
-use state::StateSignal;
+use state::{Service, State};
 
 use static_cell::make_static;
 
@@ -56,38 +57,31 @@ fn main() -> Result<(), EspError> {
 
     let started_services = &Mutex::new(Cell::new(EnumSet::EMPTY));
 
-    let start_state_for_bt = &Signal::new();
-    let start_state_for_audio_state = &Signal::new();
-    let start_state_for_audio_outgoing = &Signal::new();
-    let start_state_for_audio_incoming = &Signal::new();
-
-    let phone_state_for_audio = &StateSignal::new();
-    let phone_state_for_can = &StateSignal::new();
-
-    let bt_state_for_can = &StateSignal::new();
-
-    let audio_state_for_can = &StateSignal::new();
-
-    let radio_state_for_can = &StateSignal::new();
+    let start_state = State::<NoopRawMutex, _>::new();
+    let phone_state = State::<EspRawMutex, _>::new();
+    let bt_state = State::<EspRawMutex, _>::new();
+    let audio_state = State::<EspRawMutex, _>::new();
+    let radio_state = State::<NoopRawMutex, _>::new();
+    let buttons_state = State::<NoopRawMutex, _>::new();
 
     executor
         .spawn_local_collect(
             bt::process(
                 modem,
                 nvs,
-                start_state_for_bt,
+                start_state.receiver(Service::Bt),
                 started_services,
-                [bt_state_for_can],
-                [audio_state_for_can],
-                [phone_state_for_audio, phone_state_for_can],
+                bt_state.sender(),
+                audio_state.sender(),
+                phone_state.sender(),
             ),
             &mut tasks,
         )
         .unwrap()
         .spawn_local_collect(
             audio::process_state(
-                phone_state_for_audio,
-                start_state_for_audio_state,
+                phone_state.receiver(Service::AudioState),
+                start_state.receiver(Service::AudioState),
                 started_services,
             ),
             &mut tasks,
@@ -100,7 +94,7 @@ fn main() -> Result<(), EspError> {
                 i2s0,
                 adc_buf,
                 || {},
-                start_state_for_audio_outgoing,
+                start_state.receiver(Service::AudioOutgoing),
                 started_services,
             ),
             &mut tasks,
@@ -113,7 +107,7 @@ fn main() -> Result<(), EspError> {
                 i2s_dout,
                 i2s_ws,
                 i2s_buf,
-                start_state_for_audio_incoming,
+                start_state.receiver(Service::AudioIncoming),
                 started_services,
             ),
             &mut tasks,
@@ -124,19 +118,14 @@ fn main() -> Result<(), EspError> {
                 can,
                 tx,
                 rx,
+                start_state.sender(),
                 started_services,
-                bt_state_for_can,
-                audio_state_for_can,
-                phone_state_for_can,
-                radio_state_for_can,
-                [
-                    start_state_for_bt,
-                    start_state_for_audio_state,
-                    start_state_for_audio_outgoing,
-                    start_state_for_audio_incoming,
-                ],
-                [radio_state_for_can],
-                [],
+                bt_state.receiver(Service::Can),
+                audio_state.receiver(Service::Can),
+                phone_state.receiver(Service::Can),
+                radio_state.receiver(Service::Can),
+                radio_state.sender(),
+                buttons_state.sender(),
             ),
             &mut tasks,
         )

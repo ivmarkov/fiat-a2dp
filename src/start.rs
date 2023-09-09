@@ -1,16 +1,17 @@
 use core::cell::Cell;
 
-use embassy_sync::{
-    blocking_mutex::{raw::NoopRawMutex, Mutex},
-    signal::Signal,
+use embassy_sync::blocking_mutex::{
+    raw::{NoopRawMutex, RawMutex},
+    Mutex,
 };
 
 use enumset::EnumSet;
 
 use esp_idf_svc::sys::EspError;
+
 use log::info;
 
-use crate::state::Service;
+use crate::state::{Receiver, Service};
 
 pub fn get_started_services(
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
@@ -43,10 +44,10 @@ pub fn set_service_started(
 }
 
 pub async fn wait_start(
-    start_state: &Signal<NoopRawMutex, bool>,
-    start: bool,
+    start: &Receiver<'_, impl RawMutex, bool>,
+    wait_start: bool,
 ) -> Result<(), EspError> {
-    while start_state.wait().await != start {}
+    while start.recv().await != wait_start {}
 
     Ok(())
 }

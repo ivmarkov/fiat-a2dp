@@ -1,5 +1,5 @@
 use core::cmp::min;
-use std::mem::MaybeUninit;
+use core::mem::MaybeUninit;
 
 pub struct RingBuf<const N: usize> {
     buf: MaybeUninit<[u8; N]>,
