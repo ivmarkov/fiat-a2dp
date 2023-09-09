@@ -1,9 +1,17 @@
+use core::cell::Cell;
 use core::cmp::min;
 
 use embassy_futures::select::{select, select4, select_slice, Either, Either4};
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+
+use embassy_sync::{
+    blocking_mutex::{raw::NoopRawMutex, Mutex},
+    signal::Signal,
+};
+
 use embassy_time::{Duration, Timer};
+
 use enumset::EnumSet;
+
 use esp_idf_svc::{
     hal::{
         can::{AsyncCanDriver, CanConfig, Frame, OwnedAsyncCanDriver, CAN},
@@ -13,10 +21,12 @@ use esp_idf_svc::{
     sys::EspError,
 };
 
+use log::info;
+
 use crate::{
-    audio,
     select_spawn::SelectSpawn,
-    state::{signal_all, AudioState, BtState, PhoneState, RadioState, StateSignal},
+    start::get_started_services,
+    state::{signal_all, AudioState, BtState, PhoneState, RadioState, Service, StateSignal},
 };
 
 use self::message::{
@@ -576,19 +586,23 @@ pub mod message {
     }
 }
 
-pub async fn process<const RN: usize, const BN: usize>(
+pub async fn process<const SN: usize, const RN: usize, const BN: usize>(
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     bt_state: &StateSignal<BtState>,
     audio_state: &StateSignal<AudioState>,
     phone_state: &StateSignal<PhoneState>,
     // display_signal: &StateSignal<DisplayState>,
     radio_state: &StateSignal<RadioState>,
+    start_state_signals: [&Signal<NoopRawMutex, bool>; SN],
     radio_signals: [&StateSignal<RadioState>; RN],
     buttons_signals: [&StateSignal<EnumSet<SteeringWheelButton>>; BN],
 ) -> Result<(), EspError> {
-    let driver = create(can, tx, rx)?;
+    info!("Starting service CAN");
+
+    let mut driver = create(can, tx, rx)?;
 
     let send_radio_switch = &Signal::new();
     let send_radio_display = &Signal::new();
@@ -599,38 +613,51 @@ pub async fn process<const RN: usize, const BN: usize>(
     let radio_text_state = &Signal::new();
     let cockpit_text_state = &Signal::new();
 
-    SelectSpawn::run(process_radio(
-        bt_state,
-        audio_state,
-        phone_state,
-        radio_state,
-        send_radio_switch,
-        radio_text_state,
-    ))
-    .chain(process_display(radio_text_state, true, send_radio_display))
-    .chain(process_display(
-        cockpit_text_state,
-        false,
-        send_cockpit_display,
-    ))
-    .chain(process_send(
-        &driver,
-        &[
+    driver.start()?;
+
+    info!("Service CAN started");
+
+    let res = SelectSpawn::run(core::future::pending())
+        .chain(process_radio(
+            bt_state,
+            audio_state,
+            phone_state,
+            radio_state,
             send_radio_switch,
-            send_radio_display,
+            radio_text_state,
+        ))
+        .chain(process_display(radio_text_state, true, send_radio_display))
+        .chain(process_display(
+            cockpit_text_state,
+            false,
             send_cockpit_display,
-            send_proxi,
+        ))
+        .chain(process_send(
+            &driver,
+            &[
+                send_radio_switch,
+                send_radio_display,
+                send_cockpit_display,
+                send_proxi,
+                send_status,
+            ],
+        ))
+        .chain(process_recv(
+            &driver,
+            started_services,
             send_status,
-        ],
-    ))
-    .chain(process_recv(
-        &driver,
-        send_status,
-        send_proxi,
-        &radio_signals,
-        &buttons_signals,
-    ))
-    .await
+            send_proxi,
+            &start_state_signals,
+            &radio_signals,
+            &buttons_signals,
+        ))
+        .await;
+
+    driver.stop()?;
+
+    info!("Service CAN stopped");
+
+    res
 }
 
 fn create<'d>(
@@ -783,11 +810,14 @@ async fn process_send<'d, const N: usize>(
 
 async fn process_recv<'d>(
     driver: &OwnedAsyncCanDriver<'d>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     send_status_signal: &Signal<NoopRawMutex, Frame>,
     send_proxi_signal: &Signal<NoopRawMutex, Frame>,
+    start_state_signals: &[&Signal<NoopRawMutex, bool>],
     radio_signals: &[&StateSignal<RadioState>],
     buttons_signals: &[&StateSignal<EnumSet<SteeringWheelButton>>],
 ) -> Result<(), EspError> {
+    let mut shutdown_request = false;
     let mut pending_proxi_request = false;
     let mut pending_proxi_value = None;
 
@@ -796,7 +826,13 @@ async fn process_recv<'d>(
         let message: Message<'_> = (&frame).into();
 
         match message.topic {
-            Topic::BodyComputer(payload) => process_recv_body_computer(payload, send_status_signal),
+            Topic::BodyComputer(payload) => process_recv_body_computer(
+                payload,
+                started_services,
+                &mut shutdown_request,
+                send_status_signal,
+                start_state_signals,
+            ),
             Topic::Proxi(payload) => process_recv_proxi(
                 payload,
                 &mut pending_proxi_request,
@@ -853,16 +889,35 @@ fn process_recv_proxi(
 
 fn process_recv_body_computer(
     payload: BodyComputer<'_>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
+    shutdown_request: &mut bool,
     send_frame_signal: &Signal<NoopRawMutex, Frame>,
+    start_state_signals: &[&Signal<NoopRawMutex, bool>],
 ) {
     match payload {
-        BodyComputer::WakeupRequest => (),
-        BodyComputer::StatusRequest => todo!(),
-        BodyComputer::ShutDownRequest => todo!(),
-        BodyComputer::PoweringOn => todo!(),
-        BodyComputer::Active => todo!(),
-        BodyComputer::AboutToSleep => todo!(),
-        BodyComputer::Unknown(_) => todo!(),
+        BodyComputer::WakeupRequest => {
+            *shutdown_request = false;
+            signal_all(start_state_signals, true);
+        }
+        BodyComputer::ShutDownRequest => {
+            *shutdown_request = true;
+            signal_all(start_state_signals, false);
+        }
+        BodyComputer::StatusRequest => {
+            let started = get_started_services(started_services);
+            let shutdown = *shutdown_request;
+
+            let report_state = if !shutdown && started == EnumSet::ALL {
+                BodyComputer::Active
+            } else if shutdown && started == EnumSet::EMPTY {
+                BodyComputer::AboutToSleep
+            } else {
+                BodyComputer::PoweringOn
+            };
+
+            send_frame_signal.signal(as_frame(Topic::BodyComputer(report_state)));
+        }
+        _ => (),
     }
 }
 

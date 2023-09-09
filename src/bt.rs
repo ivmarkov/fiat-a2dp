@@ -1,3 +1,11 @@
+use core::cell::Cell;
+
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::signal::Signal;
+
+use enumset::EnumSet;
+
 use esp_idf_svc::bt::a2dp::ConnectionStatus;
 use esp_idf_svc::bt::hfp::client;
 use esp_idf_svc::sys::EspError;
@@ -21,69 +29,81 @@ use esp_idf_svc::hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral};
 use log::*;
 
 use crate::audio::AUDIO_BUFFERS;
-use crate::state::{signal_all, AudioState, BtState, PhoneState, StateSignal};
+
+use crate::start::{set_service_started, wait_start};
+use crate::state::{signal_all, AudioState, BtState, PhoneState, Service, StateSignal};
 
 pub async fn process<'d, const BN: usize, const AN: usize, const PN: usize>(
-    modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
+    mut modem: impl Peripheral<P = impl BluetoothModemPeripheral> + 'd,
     nvs: EspDefaultNvsPartition,
+    start_state: &Signal<NoopRawMutex, bool>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     bt_signals: [&StateSignal<BtState>; BN],
     audio_signals: [&StateSignal<AudioState>; AN],
     phone_signals: [&StateSignal<PhoneState>; PN],
 ) -> Result<(), EspError> {
-    let bt = BtDriver::<BtClassic>::new(modem, Some(nvs))?;
+    loop {
+        {
+            let bt = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
 
-    bt.set_device_name("Fiat")?;
+            bt.set_device_name("Fiat")?;
 
-    info!("Bluetooth initialized");
+            info!("Bluetooth initialized");
 
-    let gap = EspGap::new(&bt)?;
+            let gap = EspGap::new(&bt)?;
 
-    info!("GAP created");
+            info!("GAP created");
 
-    let avrcc = EspAvrcc::new(&bt)?;
+            let avrcc = EspAvrcc::new(&bt)?;
 
-    info!("AVRCC created");
+            info!("AVRCC created");
 
-    let a2dp = EspA2dp::new_sink(&bt)?;
+            let a2dp = EspA2dp::new_sink(&bt)?;
 
-    info!("A2DP created");
+            info!("A2DP created");
 
-    let hfpc = EspHfpc::new(&bt, None)?;
+            let hfpc = EspHfpc::new(&bt, None)?;
 
-    info!("HFPC created");
+            info!("HFPC created");
 
-    gap.initialize(|event| handle_gap(&gap, &bt_signals, event))?;
+            gap.initialize(|event| handle_gap(&gap, &bt_signals, event))?;
 
-    gap.set_cod(
-        Cod::new(
-            CodMajorDeviceType::AudioVideo,
-            0,
-            CodServiceClass::Audio | CodServiceClass::Telephony,
-        ),
-        CodMode::Init,
-    )?;
+            gap.set_cod(
+                Cod::new(
+                    CodMajorDeviceType::AudioVideo,
+                    0,
+                    CodServiceClass::Audio | CodServiceClass::Telephony,
+                ),
+                CodMode::Init,
+            )?;
 
-    gap.set_ssp_io_cap(IOCapabilities::None)?;
-    gap.set_pin("1234")?;
-    gap.set_scan_mode(true, DiscoveryMode::Discoverable)?;
+            gap.set_ssp_io_cap(IOCapabilities::None)?;
+            gap.set_pin("1234")?;
+            gap.set_scan_mode(true, DiscoveryMode::Discoverable)?;
 
-    info!("GAP initialized");
+            info!("GAP initialized");
 
-    avrcc.initialize(|event| handle_avrcc(&avrcc, event))?;
+            avrcc.initialize(|event| handle_avrcc(&avrcc, event))?;
 
-    info!("AVRCC initialized");
+            info!("AVRCC initialized");
 
-    a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_signals, event))?;
+            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_signals, event))?;
 
-    info!("A2DP initialized");
+            info!("A2DP initialized");
 
-    hfpc.initialize(|event| handle_hfpc(&hfpc, &phone_signals, event))?;
+            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone_signals, event))?;
 
-    info!("HFPC initialized");
+            info!("HFPC initialized");
 
-    a2dp.set_delay(core::time::Duration::from_millis(150))?;
+            a2dp.set_delay(core::time::Duration::from_millis(150))?;
 
-    core::future::pending().await
+            set_service_started(started_services, Service::Bt, true);
+            wait_start(start_state, false).await?;
+        }
+
+        set_service_started(started_services, Service::Bt, false);
+        wait_start(start_state, true).await?;
+    }
 }
 
 fn handle_gap<'d, M>(

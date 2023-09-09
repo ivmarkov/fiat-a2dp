@@ -1,15 +1,19 @@
 #![feature(type_alias_impl_trait)]
 
-use core::borrow::BorrowMut;
-use std::marker::PhantomData;
+use core::cell::Cell;
 
-use esp_idf_svc::hal::gpio::{InputMode, InputPin, PinDriver, RTCMode};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::signal::Signal;
+
+use enumset::EnumSet;
+
 use esp_idf_svc::hal::sys::EspError;
 use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 
 use state::StateSignal;
+
 use static_cell::make_static;
 
 mod audio;
@@ -17,6 +21,7 @@ mod bt;
 mod can;
 mod ringbuf;
 mod select_spawn;
+mod start;
 mod state;
 
 fn main() -> Result<(), EspError> {
@@ -49,11 +54,20 @@ fn main() -> Result<(), EspError> {
     let adc_buf = make_static!([AdcMeasurement::INIT; 1000]);
     let i2s_buf = make_static!([0u8; 4000]);
 
+    let started_services = &Mutex::new(Cell::new(EnumSet::EMPTY));
+
+    let start_state_for_bt = &Signal::new();
+    let start_state_for_audio_state = &Signal::new();
+    let start_state_for_audio_outgoing = &Signal::new();
+    let start_state_for_audio_incoming = &Signal::new();
+
     let phone_state_for_audio = &StateSignal::new();
+    let phone_state_for_can = &StateSignal::new();
 
     let bt_state_for_can = &StateSignal::new();
+
     let audio_state_for_can = &StateSignal::new();
-    let phone_state_for_can = &StateSignal::new();
+
     let radio_state_for_can = &StateSignal::new();
 
     executor
@@ -61,6 +75,8 @@ fn main() -> Result<(), EspError> {
             bt::process(
                 modem,
                 nvs,
+                start_state_for_bt,
+                started_services,
                 [bt_state_for_can],
                 [audio_state_for_can],
                 [phone_state_for_audio, phone_state_for_can],
@@ -68,15 +84,38 @@ fn main() -> Result<(), EspError> {
             &mut tasks,
         )
         .unwrap()
-        .spawn_local_collect(audio::process_state(phone_state_for_audio), &mut tasks)
-        .unwrap()
         .spawn_local_collect(
-            audio::process_outgoing(adc1, adc_pin, i2s0, adc_buf, || {}),
+            audio::process_state(
+                phone_state_for_audio,
+                start_state_for_audio_state,
+                started_services,
+            ),
             &mut tasks,
         )
         .unwrap()
         .spawn_local_collect(
-            audio::process_incoming(i2s, i2s_bclk, i2s_dout, i2s_ws, i2s_buf),
+            audio::process_outgoing(
+                adc1,
+                adc_pin,
+                i2s0,
+                adc_buf,
+                || {},
+                start_state_for_audio_outgoing,
+                started_services,
+            ),
+            &mut tasks,
+        )
+        .unwrap()
+        .spawn_local_collect(
+            audio::process_incoming(
+                i2s,
+                i2s_bclk,
+                i2s_dout,
+                i2s_ws,
+                i2s_buf,
+                start_state_for_audio_incoming,
+                started_services,
+            ),
             &mut tasks,
         )
         .unwrap()
@@ -85,10 +124,17 @@ fn main() -> Result<(), EspError> {
                 can,
                 tx,
                 rx,
+                started_services,
                 bt_state_for_can,
                 audio_state_for_can,
                 phone_state_for_can,
                 radio_state_for_can,
+                [
+                    start_state_for_bt,
+                    start_state_for_audio_state,
+                    start_state_for_audio_outgoing,
+                    start_state_for_audio_incoming,
+                ],
                 [radio_state_for_can],
                 [],
             ),
@@ -99,51 +145,4 @@ fn main() -> Result<(), EspError> {
     executor.run_tasks(|| true, tasks);
 
     Ok(())
-}
-
-pub struct Foo<'d>(u8, PhantomData<&'d mut ()>);
-
-impl<'d> Foo<'d> {
-    pub fn new<T, P, M>(driver: T) -> Self
-    where
-        T: BorrowMut<PinDriver<'d, P, M>>,
-        P: InputPin,
-        M: InputMode + RTCMode,
-    {
-        Self(driver.borrow().pin() as u8, PhantomData)
-    }
-}
-
-fn test0<'d1, 'd2, P1, M1, P2, M2>(
-    driver1: &mut PinDriver<'d1, P1, M1>,
-    driver2: &mut PinDriver<'d2, P2, M2>,
-) where
-    P1: InputPin,
-    M1: InputMode + RTCMode,
-    P2: InputPin,
-    M2: InputMode + RTCMode,
-    'd2: 'd1,
-{
-    let foos = test(driver1, driver2);
-
-    driver1.pin();
-
-    &foos[0];
-}
-
-fn test<'d1, 'd2, P1, M1, P2, M2>(
-    driver1: &mut PinDriver<'d1, P1, M1>,
-    driver2: &mut PinDriver<'d2, P2, M2>,
-) -> [Foo<'d1>; 2]
-where
-    P1: InputPin,
-    M1: InputMode + RTCMode,
-    P2: InputPin,
-    M2: InputMode + RTCMode,
-    'd2: 'd1,
-{
-    let foo1 = Foo::new(driver1);
-    let foo2 = Foo::new(driver2);
-
-    [foo1, foo2]
 }

@@ -1,7 +1,13 @@
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
+use embassy_futures::select::{select, Either};
+
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
 
+use enumset::EnumSet;
+
+use esp_idf_svc::hal::i2s::I2sTxSupported;
 use esp_idf_svc::sys::EspError;
 
 use esp_idf_svc::hal::{
@@ -22,7 +28,9 @@ use esp_idf_svc::hal::{
 use log::info;
 
 use crate::ringbuf::RingBuf;
-use crate::state::{PhoneState, StateSignal};
+use crate::select_spawn::SelectSpawn;
+use crate::start::{set_service_started, wait_start};
+use crate::state::{PhoneState, Service, StateSignal};
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -125,42 +133,82 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
-pub async fn process_state(phone_state: &StateSignal<PhoneState>) -> Result<(), EspError> {
+pub async fn process_state(
+    phone_state: &StateSignal<PhoneState>,
+    start_state: &Signal<NoopRawMutex, bool>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
+) -> Result<(), EspError> {
     loop {
-        let state = phone_state.wait().await;
+        info!("Starting service {:?}", Service::AudioState);
 
-        AUDIO_BUFFERS.lock(|buffers| {
-            buffers.borrow_mut().set_a2dp(!state.is_active());
-        });
+        set_service_started(started_services, Service::AudioState, true);
+
+        loop {
+            let state = select(wait_start(start_state, false), phone_state.wait()).await;
+
+            match state {
+                Either::First(other) => break other,
+                Either::Second(state) => {
+                    AUDIO_BUFFERS.lock(|buffers| {
+                        buffers.borrow_mut().set_a2dp(!state.is_active());
+                    });
+                }
+            }
+        }?;
+
+        set_service_started(started_services, Service::AudioState, false);
+        wait_start(start_state, true).await?;
     }
 }
 
-pub async fn process_outgoing<'d, O>(
-    adc1: impl Peripheral<P = ADC1> + 'd,
-    pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>> + 'd,
-    i2s0: impl Peripheral<P = I2S0> + 'd,
-    adc_buf: &mut [AdcMeasurement],
-    notify_outgoing: O,
-) -> Result<(), EspError>
-where
-    O: Fn(),
-{
-    info!("Creating ADC 22kHz input");
-
-    let mut adc_driver = AdcContDriver::new(
-        adc1,
-        i2s0,
-        &AdcContConfig::new()
-            .sample_freq(20000.Hz())
-            .frame_measurements(500)
-            .frames_count(4),
-        Attenuated::db11(pin),
-    )?;
-
-    adc_driver.start()?;
-
+pub async fn process_outgoing<'d>(
+    mut adc1: impl Peripheral<P = ADC1> + 'd,
+    mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>> + 'd,
+    mut i2s0: impl Peripheral<P = I2S0> + 'd,
+    buf: &mut [AdcMeasurement],
+    notify_outgoing: impl Fn(),
+    start_state: &Signal<NoopRawMutex, bool>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
+) -> Result<(), EspError> {
     loop {
-        let len = adc_driver.read_async(adc_buf).await?;
+        {
+            info!("Starting service {:?}", Service::AudioIncoming);
+
+            let mut driver = AdcContDriver::new(
+                &mut adc1,
+                &mut i2s0,
+                &AdcContConfig::new()
+                    .sample_freq(20000.Hz())
+                    .frame_measurements(500)
+                    .frames_count(4),
+                Attenuated::db11(&mut pin),
+            )?;
+
+            driver.start()?;
+
+            set_service_started(started_services, Service::AudioOutgoing, true);
+
+            let res = SelectSpawn::run(wait_start(start_state, false))
+                .chain(process_outgoing_read(&mut driver, buf, &notify_outgoing))
+                .await;
+
+            driver.stop()?;
+
+            res?;
+        }
+
+        set_service_started(started_services, Service::AudioOutgoing, false);
+        wait_start(start_state, true).await?;
+    }
+}
+
+async fn process_outgoing_read<'d>(
+    driver: &mut AdcContDriver<'d>,
+    adc_buf: &mut [AdcMeasurement],
+    notify_outgoing: impl Fn(),
+) -> Result<(), EspError> {
+    loop {
+        let len = driver.read_async(adc_buf).await?;
 
         if len > 0 {
             if false {
@@ -214,38 +262,74 @@ pub async fn process_incoming(
     mut dout: impl Peripheral<P = impl OutputPin>,
     mut ws: impl Peripheral<P = impl InputPin + OutputPin>,
     buf: &mut [u8],
+    start_state: &Signal<NoopRawMutex, bool>,
+    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
 ) -> Result<(), EspError> {
-    let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
-
     loop {
-        info!("Creating I2S output with A2DP: {}", a2dp_conf);
+        {
+            info!("Starting service {:?}", Service::AudioOutgoing);
 
-        let mut driver = i2s_create(&mut i2s, &mut bclk, &mut dout, &mut ws, a2dp_conf)?;
+            let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
 
-        loop {
-            let (len, a2dp) = AUDIO_BUFFERS.lock(|buffers| {
-                let mut buffers = buffers.borrow_mut();
-                let a2dp = buffers.a2dp;
+            loop {
+                info!("Creating I2S output with A2DP: {}", a2dp_conf);
 
-                if a2dp_conf == a2dp {
-                    let len = buffers.pop_incoming(buf, a2dp);
+                let mut driver = i2s_create(&mut i2s, &mut bclk, &mut dout, &mut ws, a2dp_conf)?;
 
-                    (len, a2dp)
-                } else {
-                    (0, a2dp)
+                driver.tx_enable()?;
+
+                set_service_started(started_services, Service::AudioIncoming, true);
+
+                let res = select(
+                    wait_start(start_state, false),
+                    process_incoming_read(&mut driver, buf, &mut a2dp_conf),
+                )
+                .await;
+
+                driver.tx_disable()?;
+
+                match res {
+                    Either::Second(Ok(())) => continue,
+                    Either::First(other) | Either::Second(other) => break other,
                 }
-            });
+            }?;
+        }
 
-            if a2dp_conf != a2dp {
-                a2dp_conf = a2dp;
-                break;
-            } else if len > 0 {
-                driver.write_all_async(&buf[..len]).await?;
+        set_service_started(started_services, Service::AudioIncoming, false);
+        wait_start(start_state, true).await?;
+    }
+}
+
+async fn process_incoming_read<'d>(
+    driver: &mut I2sDriver<'d, impl I2sTxSupported>,
+    buf: &mut [u8],
+    a2dp_conf: &mut bool,
+) -> Result<(), EspError> {
+    loop {
+        let (len, a2dp) = AUDIO_BUFFERS.lock(|buffers| {
+            let mut buffers = buffers.borrow_mut();
+            let a2dp = buffers.a2dp;
+
+            if *a2dp_conf == a2dp {
+                let len = buffers.pop_incoming(buf, a2dp);
+
+                (len, a2dp)
             } else {
-                AUDIO_BUFFERS_INCOMING_NOTIF.wait().await;
+                (0, a2dp)
             }
+        });
+
+        if *a2dp_conf != a2dp {
+            *a2dp_conf = a2dp;
+            break;
+        } else if len > 0 {
+            driver.write_all_async(&buf[..len]).await?;
+        } else {
+            AUDIO_BUFFERS_INCOMING_NOTIF.wait().await;
         }
     }
+
+    Ok(())
 }
 
 fn i2s_create<'a>(
@@ -272,8 +356,6 @@ fn i2s_create<'a>(
         AnyIOPin::none(),
         ws,
     )?;
-
-    driver.tx_enable()?;
 
     Ok(driver)
 }

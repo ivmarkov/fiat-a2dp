@@ -1,4 +1,5 @@
 use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
+use enumset::{EnumSet, EnumSetType};
 use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 pub type DisplayString = heapless::String<32>;
@@ -93,6 +94,14 @@ impl RadioState {
     pub fn is_bt_active(&self) -> bool {
         matches!(self, Self::BtActive)
     }
+}
+
+#[derive(Debug, EnumSetType)]
+pub enum Service {
+    Bt,
+    AudioIncoming,
+    AudioOutgoing,
+    AudioState,
 }
 
 pub type StateSignal<T> = Signal<EspRawMutex, T>;
