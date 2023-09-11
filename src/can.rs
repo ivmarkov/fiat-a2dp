@@ -613,28 +613,28 @@ pub async fn process(
     let send_proxi = &Signal::new();
     let send_status = &Signal::new();
 
-    let radio_text_state = &Signal::new();
-    let cockpit_text_state = &Signal::new();
+    // let radio_text_state = &Signal::new();
+    // let cockpit_text_state = &Signal::new();
 
     driver.start()?;
 
     info!("Service CAN started");
 
     let res = SelectSpawn::run(core::future::pending())
-        .chain(process_radio(
-            bt,
-            audio,
-            phone,
-            radio,
-            send_radio_switch,
-            radio_text_state,
-        ))
-        .chain(process_display(radio_text_state, true, send_radio_display))
-        .chain(process_display(
-            cockpit_text_state,
-            false,
-            send_cockpit_display,
-        ))
+        // .chain(process_radio(
+        //     bt,
+        //     audio,
+        //     phone,
+        //     radio,
+        //     send_radio_switch,
+        //     radio_text_state,
+        // ))
+        // .chain(process_display(radio_text_state, true, send_radio_display))
+        // .chain(process_display(
+        //     cockpit_text_state,
+        //     false,
+        //     send_cockpit_display,
+        // ))
         .chain(process_send(
             &driver,
             &[

@@ -54,7 +54,7 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
     }
 
     #[inline(always)]
-    pub fn set_a2dp(&mut self, a2dp: bool) {
+    fn set_a2dp(&mut self, a2dp: bool) {
         if self.a2dp != a2dp {
             self.a2dp = a2dp;
             self.ringbuf_incoming.clear();
@@ -172,7 +172,7 @@ pub async fn process_outgoing(
 ) -> Result<(), EspError> {
     loop {
         {
-            info!("Starting service {:?}", Service::AudioIncoming);
+            info!("Starting service {:?}", Service::AudioOutgoing);
 
             let mut driver = AdcContDriver::new(
                 &mut adc1,
@@ -267,7 +267,7 @@ pub async fn process_incoming(
 ) -> Result<(), EspError> {
     loop {
         {
-            info!("Starting service {:?}", Service::AudioOutgoing);
+            info!("Starting service {:?}", Service::AudioIncoming);
 
             let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
 

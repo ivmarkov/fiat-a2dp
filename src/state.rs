@@ -9,12 +9,14 @@ pub enum BtState {
     Uninitialized,
     Initialized,
     Paired,
-    Connected(DisplayString),
+    //Connected(DisplayString),
+    Connected,
 }
 
 impl BtState {
     pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected(_))
+        //matches!(self, Self::Connected(_))
+        matches!(self, Self::Connected)
     }
 }
 
@@ -32,8 +34,8 @@ pub enum AudioState {
     Uninitialized,
     Initialized,
     Connected,
-    Playing(TrackInfo),
-    Paused(TrackInfo),
+    //Playing(TrackInfo),
+    //Paused(TrackInfo),
 }
 
 impl AudioState {
@@ -42,12 +44,12 @@ impl AudioState {
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Playing(_) | Self::Paused(_))
+        self.is_connected() || self.track_info().is_some()
     }
 
     pub fn track_info(&self) -> Option<&TrackInfo> {
         match self {
-            Self::Playing(track_info) | Self::Paused(track_info) => Some(track_info),
+            //###Self::Playing(track_info) | Self::Paused(track_info) => Some(track_info),
             _ => None,
         }
     }
@@ -64,9 +66,12 @@ pub enum PhoneState {
     Uninitialized,
     Initialized,
     Connected,
-    Dialing(DisplayString),
-    Ringing(DisplayString),
-    CallActive(PhoneCallInfo),
+    // Dialing(DisplayString),
+    // Ringing(DisplayString),
+    // CallActive(PhoneCallInfo),
+    Dialing,
+    Ringing,
+    CallActive,
 }
 
 impl PhoneState {
@@ -77,7 +82,8 @@ impl PhoneState {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Dialing(_) | Self::Ringing(_) | Self::CallActive(_)
+            // Self::Dialing(_) | Self::Ringing(_) | Self::CallActive(_)
+            Self::Dialing | Self::Ringing | Self::CallActive
         )
     }
 }
@@ -105,7 +111,7 @@ pub enum Service {
     Bt,
 }
 
-pub struct State<M, T>([Signal<M, T>; 4])
+pub struct State<M, T>([Signal<M, T>; 5])
 where
     M: RawMutex;
 
@@ -116,7 +122,7 @@ where
     const INIT: Signal<M, T> = Signal::new();
 
     pub const fn new() -> Self {
-        Self([Self::INIT; 4])
+        Self([Self::INIT; 5])
     }
 
     pub fn receiver(&self, service: Service) -> Receiver<'_, M, T> {

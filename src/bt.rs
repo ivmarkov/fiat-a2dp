@@ -1,4 +1,4 @@
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::blocking_mutex::Mutex;
@@ -18,7 +18,7 @@ use esp_idf_svc::{
             Cod, CodMajorDeviceType, CodMode, CodServiceClass, DeviceProp, DiscoveryMode, EspGap,
             GapEvent, IOCapabilities, InqMode, PropData,
         },
-        hfp::client::{AudioStatus, EspHfpc, HfpcEvent},
+        hfp::client::{EspHfpc, HfpcEvent},
         BtClassic, BtClassicEnabled, BtDriver,
     },
     nvs::EspDefaultNvsPartition,
@@ -83,11 +83,13 @@ pub async fn process(
 
             info!("GAP initialized");
 
-            avrcc.initialize(|event| handle_avrcc(&avrcc, &audio, event))?;
+            let audio_state = Mutex::<EspRawMutex, _>::new(RefCell::new(AudioState::Uninitialized));
+
+            avrcc.initialize(|event| handle_avrcc(&avrcc, &audio_state, &audio, event))?;
 
             info!("AVRCC initialized");
 
-            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio, event))?;
+            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_state, &audio, event))?;
 
             info!("A2DP initialized");
 
@@ -132,28 +134,38 @@ fn handle_gap<'d, M>(
 
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
+    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
     audio: &Sender<'_, impl RawMutex, AudioState>,
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
 {
     match event {
-        A2dpEvent::Initialized => audio.send(AudioState::Initialized),
-        A2dpEvent::Deinitialized => audio.send(AudioState::Uninitialized),
+        A2dpEvent::Initialized => set_state(audio_state, audio, AudioState::Initialized),
+        A2dpEvent::Deinitialized => set_state(audio_state, audio, AudioState::Uninitialized),
         A2dpEvent::ConnectionState { status, .. } => match status {
-            ConnectionStatus::Connected => audio.send(AudioState::Connected),
-            ConnectionStatus::Disconnected => audio.send(AudioState::Initialized),
+            ConnectionStatus::Connected => set_state(audio_state, audio, AudioState::Connected),
+            ConnectionStatus::Disconnected => {
+                set_state(audio_state, audio, AudioState::Initialized)
+            }
             _ => (),
         },
         A2dpEvent::SinkData(data) => {
             AUDIO_BUFFERS.lock(|buffers| {
-                let mut buffers = buffers.borrow_mut();
-
-                buffers.push_incoming(data, true, || {});
+                buffers.borrow_mut().push_incoming(data, true, || {});
             });
         }
         _ => (),
     }
+}
+
+fn set_state(
+    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
+    audio: &Sender<'_, impl RawMutex, AudioState>,
+    state: AudioState,
+) {
+    audio_state.lock(|s: &RefCell<AudioState>| *s.borrow_mut() = state.clone());
+    audio.send(state);
 }
 
 fn handle_hfpc<'d, M>(
@@ -176,38 +188,25 @@ where
 
             0
         }
-        HfpcEvent::AudioState { status, .. } => {
-            AUDIO_BUFFERS.lock(|buffers| {
-                buffers.borrow_mut().set_a2dp(!matches!(
-                    status,
-                    AudioStatus::Connected | AudioStatus::ConnectedMsbc
-                ));
-            });
-
-            0
-        }
         HfpcEvent::RecvData(data) => {
             AUDIO_BUFFERS.lock(|buffers| {
-                let mut buffers = buffers.borrow_mut();
-
-                buffers.push_incoming(data, false, || {
+                buffers.borrow_mut().push_incoming(data, false, || {
                     hfpc.request_outgoing_data_ready();
-                });
+                })
             });
 
             0
         }
-        HfpcEvent::SendData(data) => AUDIO_BUFFERS.lock(|buffers| {
-            let mut buffers = buffers.borrow_mut();
-
-            buffers.pop_outgoing(data, false)
-        }),
+        HfpcEvent::SendData(data) => {
+            AUDIO_BUFFERS.lock(|buffers| buffers.borrow_mut().pop_outgoing(data, false))
+        }
         _ => 0,
     }
 }
 
 fn handle_avrcc<'d, M>(
     avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
+    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
     audio: &Sender<'_, impl RawMutex, AudioState>,
     event: AvrccEvent<'_>,
 ) where
