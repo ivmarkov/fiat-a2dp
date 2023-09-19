@@ -8,6 +8,7 @@ use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
 mod audio;
 mod bt;
 mod can;
+mod display;
 mod ringbuf;
 mod run;
 mod select_spawn;
@@ -22,7 +23,9 @@ fn main() -> Result<(), EspError> {
         heap_caps_print_heap_info(MALLOC_CAP_DEFAULT);
     }
 
-    reduce_bt_memory()?;
+    let mut peripherals = Peripherals::take().unwrap();
+
+    reduce_bt_memory(&mut peripherals.modem)?;
 
     unsafe {
         heap_caps_print_heap_info(MALLOC_CAP_DEFAULT);
@@ -30,7 +33,7 @@ fn main() -> Result<(), EspError> {
 
     thread::Builder::new()
         .stack_size(10000)
-        .spawn(move || run::run(Peripherals::take().unwrap()).unwrap())
+        .spawn(move || run::run(peripherals).unwrap())
         .unwrap();
 
     Ok(())

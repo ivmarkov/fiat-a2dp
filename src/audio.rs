@@ -30,7 +30,7 @@ use log::info;
 use crate::ringbuf::RingBuf;
 use crate::select_spawn::SelectSpawn;
 use crate::start::{set_service_started, wait_start};
-use crate::state::{PhoneState, Receiver, Service};
+use crate::state::{AudioState, Receiver, Service};
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -134,7 +134,7 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
 pub async fn process_state(
-    phone: Receiver<'_, impl RawMutex, PhoneState>,
+    phone_audio: Receiver<'_, impl RawMutex, AudioState>,
     start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
 ) -> Result<(), EspError> {
@@ -144,7 +144,7 @@ pub async fn process_state(
         set_service_started(started_services, Service::AudioState, true);
 
         loop {
-            let state = select(wait_start(&start, false), phone.recv()).await;
+            let state = select(wait_start(&start, false), phone_audio.recv()).await;
 
             match state {
                 Either::First(other) => break other,

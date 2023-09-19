@@ -1,32 +1,29 @@
-use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
+use std::cell::RefCell;
+
+use embassy_sync::{
+    blocking_mutex::{raw::RawMutex, Mutex},
+    signal::Signal,
+};
 
 use enumset::EnumSetType;
+use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 pub type DisplayString = heapless::String<32>;
+
+pub type StateVersion = u32;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BtState {
     Uninitialized,
     Initialized,
     Paired,
-    //Connected(DisplayString),
     Connected,
 }
 
 impl BtState {
     pub fn is_connected(&self) -> bool {
-        //matches!(self, Self::Connected(_))
         matches!(self, Self::Connected)
     }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TrackInfo {
-    pub artist: DisplayString,
-    pub album: DisplayString,
-    pub song: DisplayString,
-    pub offset: core::time::Duration,
-    pub duration: core::time::Duration,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -34,8 +31,8 @@ pub enum AudioState {
     Uninitialized,
     Initialized,
     Connected,
-    //Playing(TrackInfo),
-    //Paused(TrackInfo),
+    Streaming,
+    Suspended,
 }
 
 impl AudioState {
@@ -44,47 +41,97 @@ impl AudioState {
     }
 
     pub fn is_active(&self) -> bool {
-        self.is_connected() || self.track_info().is_some()
+        matches!(self, Self::Streaming)
     }
+}
 
-    pub fn track_info(&self) -> Option<&TrackInfo> {
-        match self {
-            //###Self::Playing(track_info) | Self::Paused(track_info) => Some(track_info),
-            _ => None,
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TrackInfo {
+    pub version: u32,
+    pub artist: DisplayString,
+    pub album: DisplayString,
+    pub song: DisplayString,
+    pub offset: core::time::Duration,
+    pub duration: core::time::Duration,
+    pub paused: bool,
+}
+
+impl TrackInfo {
+    pub const fn new() -> Self {
+        Self {
+            version: 0,
+            artist: DisplayString::new(),
+            album: DisplayString::new(),
+            song: DisplayString::new(),
+            offset: core::time::Duration::from_secs(0),
+            duration: core::time::Duration::from_secs(0),
+            paused: false,
         }
     }
+
+    pub fn reset(&mut self) {
+        self.artist.clear();
+        self.album.clear();
+        self.song.clear();
+        self.offset = core::time::Duration::from_secs(0);
+        self.duration = core::time::Duration::from_secs(0);
+        self.paused = false;
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PhoneCallInfo {
-    pub phone: DisplayString,
-    pub duration: core::time::Duration,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum PhoneState {
+pub enum AudioTrackState {
     Uninitialized,
     Initialized,
     Connected,
-    // Dialing(DisplayString),
-    // Ringing(DisplayString),
-    // CallActive(PhoneCallInfo),
-    Dialing,
-    Ringing,
-    CallActive,
+    Playing,
+    Paused,
 }
 
-impl PhoneState {
+impl AudioTrackState {
     pub fn is_connected(&self) -> bool {
         matches!(self, Self::Connected) || self.is_active()
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(
-            self,
-            // Self::Dialing(_) | Self::Ringing(_) | Self::CallActive(_)
-            Self::Dialing | Self::Ringing | Self::CallActive
-        )
+        matches!(self, Self::Playing | Self::Paused)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PhoneCallInfo {
+    pub version: u32,
+    pub phone: DisplayString,
+    pub duration: core::time::Duration,
+}
+
+impl PhoneCallInfo {
+    pub const fn new() -> Self {
+        Self {
+            version: 0,
+            phone: DisplayString::new(),
+            duration: core::time::Duration::from_secs(0),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.phone.clear();
+        self.duration = core::time::Duration::from_secs(0);
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PhoneCallState {
+    Idle,
+    Dialing(StateVersion),
+    DialingAlerting(StateVersion),
+    Ringing(StateVersion),
+    CallActive(StateVersion),
+}
+
+impl PhoneCallState {
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::Idle)
     }
 }
 
@@ -109,9 +156,10 @@ pub enum Service {
     AudioIncoming,
     AudioState,
     Bt,
+    Display,
 }
 
-pub struct State<M, T>([Signal<M, T>; 5])
+pub struct State<M, T>([Signal<M, T>; 6])
 where
     M: RawMutex;
 
@@ -122,7 +170,7 @@ where
     const INIT: Signal<M, T> = Signal::new();
 
     pub const fn new() -> Self {
-        Self([Self::INIT; 5])
+        Self([Self::INIT; 6])
     }
 
     pub fn receiver(&self, service: Service) -> Receiver<'_, M, T> {

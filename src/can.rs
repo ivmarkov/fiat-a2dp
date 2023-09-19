@@ -1,7 +1,8 @@
 use core::cell::Cell;
 use core::cmp::min;
+use std::{cell::RefCell, fmt::Write};
 
-use embassy_futures::select::{select, select4, select_slice, Either, Either4};
+use embassy_futures::select::{select, select_slice, Either};
 
 use embassy_sync::{
     blocking_mutex::{
@@ -20,6 +21,7 @@ use esp_idf_svc::{
         can::{AsyncCanDriver, CanConfig, Frame, OwnedAsyncCanDriver, CAN},
         gpio::{InputPin, OutputPin},
         peripheral::Peripheral,
+        task::embassy_sync::EspRawMutex,
     },
     sys::EspError,
 };
@@ -29,7 +31,9 @@ use log::info;
 use crate::{
     select_spawn::SelectSpawn,
     start::get_started_services,
-    state::{AudioState, BtState, PhoneState, RadioState, Receiver, Sender, Service},
+    state::{
+        AudioState, PhoneCallInfo, RadioState, Receiver, Sender, Service, StateVersion, TrackInfo,
+    },
 };
 
 use self::message::{
@@ -589,17 +593,70 @@ pub mod message {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DisplayText {
+    pub version: StateVersion,
+    pub text: heapless::String<32>,
+}
+
+impl DisplayText {
+    pub const fn new() -> Self {
+        Self {
+            version: 0,
+            text: heapless::String::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.version += 1;
+        self.text.clear();
+    }
+
+    pub fn update_phone_info(&mut self, phone: &PhoneCallInfo) {
+        self.version += 1;
+        self.text.clear();
+
+        let secs = phone.duration.as_secs();
+
+        let mins = secs / 60;
+        let secs = secs % 60;
+
+        write!(&mut self.text, "{} {}:{}", phone.phone, mins, secs).unwrap();
+    }
+
+    pub fn update_track_info(&mut self, track: &TrackInfo) {
+        self.version += 1;
+        self.text.clear();
+
+        let secs = track.offset.as_secs();
+
+        let mins = secs / 60;
+        let secs = secs % 60;
+
+        write!(
+            &mut self.text,
+            "{} {} {}:{}",
+            track.album, track.artist, mins, secs
+        )
+        .unwrap();
+    }
+}
+
+pub static RADIO_DISPLAY: Mutex<EspRawMutex, RefCell<DisplayText>> =
+    Mutex::new(RefCell::new(DisplayText::new()));
+
 pub async fn process(
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
     start: Sender<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    bt: Receiver<'_, impl RawMutex, BtState>,
     audio: Receiver<'_, impl RawMutex, AudioState>,
-    phone: Receiver<'_, impl RawMutex, PhoneState>,
-    // display_signal: &StateSignal<DisplayState>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
+    phone: Receiver<'_, impl RawMutex, AudioState>,
+    cockpit_display: &Signal<impl RawMutex, ()>,
+    cockpit_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
+    radio_display: &Signal<impl RawMutex, ()>,
+    radio_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
     radio_out: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), EspError> {
@@ -613,28 +670,24 @@ pub async fn process(
     let send_proxi = &Signal::new();
     let send_status = &Signal::new();
 
-    // let radio_text_state = &Signal::new();
-    // let cockpit_text_state = &Signal::new();
-
     driver.start()?;
 
     info!("Service CAN started");
 
     let res = SelectSpawn::run(core::future::pending())
-        // .chain(process_radio(
-        //     bt,
-        //     audio,
-        //     phone,
-        //     radio,
-        //     send_radio_switch,
-        //     radio_text_state,
-        // ))
-        // .chain(process_display(radio_text_state, true, send_radio_display))
-        // .chain(process_display(
-        //     cockpit_text_state,
-        //     false,
-        //     send_cockpit_display,
-        // ))
+        .chain(process_radio_out(audio, phone, send_radio_switch))
+        .chain(process_display(
+            radio_display,
+            radio_display_state,
+            true,
+            send_radio_display,
+        ))
+        .chain(process_display(
+            cockpit_display,
+            cockpit_display_state,
+            false,
+            send_cockpit_display,
+        ))
         .chain(process_send(
             &driver,
             &[
@@ -671,20 +724,15 @@ fn create<'d>(
     AsyncCanDriver::new(can, tx, rx, &CanConfig::new())
 }
 
-async fn process_radio(
-    bt: Receiver<'_, impl RawMutex, BtState>,
+async fn process_radio_out(
     audio: Receiver<'_, impl RawMutex, AudioState>,
-    phone: Receiver<'_, impl RawMutex, PhoneState>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
+    phone: Receiver<'_, impl RawMutex, AudioState>,
     radio_switch_out: &Signal<NoopRawMutex, Frame>,
-    radio_display_out: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
 ) -> Result<(), EspError> {
-    let mut sradio = RadioState::Unknown;
-    let mut sbt = BtState::Uninitialized;
     let mut saudio = AudioState::Uninitialized;
-    let mut sphone = PhoneState::Uninitialized;
+    let mut sphone = AudioState::Uninitialized;
 
-    let switch_state = |audio: &AudioState, phone: &PhoneState| {
+    let switch_state = |audio: &AudioState, phone: &AudioState| {
         let topic = if phone.is_active() {
             Topic::Bt(Bt::Phone)
         } else if audio.is_active() {
@@ -693,18 +741,14 @@ async fn process_radio(
             Topic::Bt(Bt::Mute)
         };
 
-        radio_display_out.signal(None);
         radio_switch_out.signal(as_frame(topic));
     };
 
     loop {
-        let ret = select4(bt.recv(), audio.recv(), phone.recv(), radio.recv()).await;
+        let ret = select(audio.recv(), phone.recv()).await;
 
         match ret {
-            Either4::First(new) => {
-                sbt = new;
-            }
-            Either4::Second(new) => {
+            Either::First(new) => {
                 let switch = saudio.is_active() != new.is_active();
 
                 saudio = new;
@@ -713,7 +757,7 @@ async fn process_radio(
                     switch_state(&saudio, &sphone);
                 }
             }
-            Either4::Third(new) => {
+            Either::Second(new) => {
                 let switch = sphone.is_active() != sphone.is_active();
 
                 sphone = new;
@@ -722,56 +766,41 @@ async fn process_radio(
                     switch_state(&saudio, &sphone);
                 }
             }
-            Either4::Fourth(new) => {
-                sradio = new;
-            }
-        }
-
-        if sradio.is_bt_active() {
-            if sphone.is_active() {
-                // TODO: Send phone state (calling etc.)
-            } else if saudio.is_active() {
-                if let Some(track_info) = saudio.track_info() {
-                    radio_display_out.signal(Some("".into()) /* TODO */);
-                }
-            }
         }
     }
 }
 
 async fn process_display(
-    text: &Signal<NoopRawMutex, Option<heapless::String<128>>>,
+    new_text: &Signal<impl RawMutex, ()>,
+    text: &Mutex<impl RawMutex, RefCell<DisplayText>>,
     for_radio: bool,
     display_out: &Signal<NoopRawMutex, Frame>,
 ) -> Result<(), EspError> {
-    let mut stext = None;
+    let mut version = None;
     let mut offset = 0;
+    let mut processing = false;
 
     loop {
-        match select(text.wait(), Timer::after(Duration::from_millis(10))).await {
-            Either::First(text_data) => {
-                if let Some(text_data) = text_data {
-                    stext = Some(text_data);
-                    offset = 0;
-                } else {
-                    stext = None;
-                }
-            }
-            Either::Second(_) => {
-                if stext.is_some() {
-                    offset += 8;
-                }
-            }
-        }
+        select(new_text.wait(), Timer::after(Duration::from_millis(10))).await;
 
-        if let Some(text_data) = &stext {
-            if !display_out.signaled() {
-                let chunk_payload = &text_data[offset..min(offset + 8, text_data.len())];
+        text.lock(|text| {
+            let text = text.borrow();
+
+            if Some(text.version) != version {
+                version = Some(text.version);
+                offset = 0;
+                processing = true;
+            }
+
+            if !display_out.signaled() && processing {
+                let text = &text.text;
+
+                let chunk_payload = &text[offset..min(offset + 8, text.len())];
                 let chunk = offset / 8;
-                let total_chunks = if text_data.is_empty() {
+                let total_chunks = if text.is_empty() {
                     1
                 } else {
-                    text_data.len() / 8 + (if text_data.len() % 8 > 0 { 1 } else { 0 })
+                    text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 })
                 } - 1;
 
                 let topic = Topic::Display(Display::Text {
@@ -784,10 +813,10 @@ async fn process_display(
                 display_out.signal(as_frame(topic));
 
                 if chunk == total_chunks {
-                    stext = None;
+                    processing = false;
                 }
             }
-        }
+        });
     }
 }
 

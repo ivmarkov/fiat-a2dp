@@ -5,8 +5,9 @@ use embassy_sync::blocking_mutex::Mutex;
 
 use enumset::EnumSet;
 
-use esp_idf_svc::bt::a2dp::ConnectionStatus;
-use esp_idf_svc::bt::hfp::client;
+use esp_idf_svc::bt::a2dp::{AudioStatus, ConnectionStatus};
+use esp_idf_svc::bt::avrc::{Notification, PlaybackStatus};
+use esp_idf_svc::bt::hfp::client::{self, CallSetupStatus};
 use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::{
@@ -15,8 +16,8 @@ use esp_idf_svc::{
         avrc::controller::{AvrccEvent, EspAvrcc},
         avrc::{MetadataId, NotificationType},
         gap::{
-            Cod, CodMajorDeviceType, CodMode, CodServiceClass, DeviceProp, DiscoveryMode, EspGap,
-            GapEvent, IOCapabilities, InqMode, PropData,
+            Cod, CodMajorDeviceType, CodMode, CodServiceClass, DiscoveryMode, EspGap, GapEvent,
+            IOCapabilities,
         },
         hfp::client::{EspHfpc, HfpcEvent},
         BtClassic, BtClassicEnabled, BtDriver,
@@ -31,7 +32,10 @@ use log::*;
 use crate::audio::AUDIO_BUFFERS;
 
 use crate::start::{set_service_started, wait_start};
-use crate::state::{AudioState, BtState, PhoneState, Receiver, Sender, Service};
+use crate::state::{
+    AudioState, AudioTrackState, BtState, PhoneCallInfo, PhoneCallState, Receiver, Sender, Service,
+    TrackInfo,
+};
 
 pub async fn process(
     mut modem: impl Peripheral<P = impl BluetoothModemPeripheral>,
@@ -39,8 +43,12 @@ pub async fn process(
     start: Receiver<'_, impl RawMutex, bool>,
     started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     bt: Sender<'_, EspRawMutex, BtState>,
-    audio: Sender<'_, EspRawMutex, AudioState>,
-    phone: Sender<'_, EspRawMutex, PhoneState>,
+    audio_state: Sender<'_, impl RawMutex + Sync, AudioState>,
+    audio_track_state: Sender<'_, impl RawMutex + Sync, AudioTrackState>,
+    track_info: &Mutex<impl RawMutex + Sync, RefCell<TrackInfo>>,
+    phone_state: Sender<'_, impl RawMutex + Sync, AudioState>,
+    phone_call_state: Sender<'_, impl RawMutex + Sync, PhoneCallState>,
+    phone_call_info: &Mutex<impl RawMutex + Sync, RefCell<PhoneCallInfo>>,
 ) -> Result<(), EspError> {
     loop {
         {
@@ -83,17 +91,25 @@ pub async fn process(
 
             info!("GAP initialized");
 
-            let audio_state = Mutex::<EspRawMutex, _>::new(RefCell::new(AudioState::Uninitialized));
-
-            avrcc.initialize(|event| handle_avrcc(&avrcc, &audio_state, &audio, event))?;
+            audio_track_state.send(AudioTrackState::Initialized);
+            avrcc
+                .initialize(|event| handle_avrcc(&avrcc, &audio_track_state, track_info, event))?;
 
             info!("AVRCC initialized");
 
-            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_state, &audio, event))?;
+            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio_state, event))?;
 
             info!("A2DP initialized");
 
-            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone, event))?;
+            hfpc.initialize(|event| {
+                handle_hfpc(
+                    &hfpc,
+                    &phone_state,
+                    &phone_call_state,
+                    phone_call_info,
+                    event,
+                )
+            })?;
 
             info!("HFPC initialized");
 
@@ -134,21 +150,23 @@ fn handle_gap<'d, M>(
 
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
-    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
-    audio: &Sender<'_, impl RawMutex, AudioState>,
+    audio_state: &Sender<'_, impl RawMutex, AudioState>,
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
 {
     match event {
-        A2dpEvent::Initialized => set_state(audio_state, audio, AudioState::Initialized),
-        A2dpEvent::Deinitialized => set_state(audio_state, audio, AudioState::Uninitialized),
+        A2dpEvent::Initialized => audio_state.send(AudioState::Initialized),
+        A2dpEvent::Deinitialized => audio_state.send(AudioState::Uninitialized),
         A2dpEvent::ConnectionState { status, .. } => match status {
-            ConnectionStatus::Connected => set_state(audio_state, audio, AudioState::Connected),
-            ConnectionStatus::Disconnected => {
-                set_state(audio_state, audio, AudioState::Initialized)
-            }
+            ConnectionStatus::Connected => audio_state.send(AudioState::Connected),
+            ConnectionStatus::Disconnected => audio_state.send(AudioState::Initialized),
             _ => (),
+        },
+        A2dpEvent::AudioState { status, .. } => match status {
+            AudioStatus::Started => audio_state.send(AudioState::Streaming),
+            AudioStatus::SuspendedByRemote => audio_state.send(AudioState::Suspended),
+            AudioStatus::Stopped => audio_state.send(AudioState::Connected),
         },
         A2dpEvent::SinkData(data) => {
             AUDIO_BUFFERS.lock(|buffers| {
@@ -159,18 +177,83 @@ fn handle_a2dp<'d, M>(
     }
 }
 
-fn set_state(
-    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
-    audio: &Sender<'_, impl RawMutex, AudioState>,
-    state: AudioState,
-) {
-    audio_state.lock(|s: &RefCell<AudioState>| *s.borrow_mut() = state.clone());
-    audio.send(state);
+fn handle_avrcc<'d, M>(
+    avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
+    audio_track_state: &Sender<'_, impl RawMutex, AudioTrackState>,
+    track_info: &Mutex<impl RawMutex, RefCell<TrackInfo>>,
+    event: AvrccEvent<'_>,
+) where
+    M: BtClassicEnabled,
+{
+    match &event {
+        AvrccEvent::Connected(_) => {
+            audio_track_state.send(AudioTrackState::Connected);
+            avrcc.request_capabilities(0).unwrap();
+        }
+        AvrccEvent::Disconnected(_) => audio_track_state.send(AudioTrackState::Initialized),
+        AvrccEvent::NotificationCapabilities { .. } => {
+            request_info(avrcc);
+        }
+        AvrccEvent::Notification(notification) => {
+            request_info(avrcc); // TODO: Necessary?
+
+            match notification {
+                Notification::Playback(status) => match status {
+                    PlaybackStatus::Stopped => {
+                        update_track_info(audio_track_state, track_info, |ti| {
+                            ti.reset();
+                        })
+                    }
+                    PlaybackStatus::Playing
+                    | PlaybackStatus::SeekForward
+                    | PlaybackStatus::SeekBackward
+                    | PlaybackStatus::Paused => {
+                        update_track_info(audio_track_state, track_info, |ti| {
+                            ti.paused = matches!(status, PlaybackStatus::Paused);
+                        })
+                    }
+                    PlaybackStatus::Paused => todo!(),
+                    _ => (),
+                },
+                Notification::TrackChanged
+                | Notification::TrackStarted
+                | Notification::TrackEnded => {
+                    update_track_info(audio_track_state, track_info, |ti| {
+                        ti.reset();
+                    })
+                }
+                Notification::PlaybackPosition(position) => {
+                    update_track_info(audio_track_state, track_info, |ti| {
+                        ti.offset = core::time::Duration::from_secs(*position as _);
+                    })
+                }
+                _ => (),
+            }
+        }
+        AvrccEvent::Metadata { id, text } => match id {
+            MetadataId::Title => update_track_info(audio_track_state, track_info, |ti| {
+                ti.song = (*text).into();
+            }),
+            MetadataId::Artist => update_track_info(audio_track_state, track_info, |ti| {
+                ti.artist = (*text).into();
+            }),
+            MetadataId::Album => update_track_info(audio_track_state, track_info, |ti| {
+                ti.album = (*text).into();
+            }),
+            MetadataId::PlayingTime => update_track_info(audio_track_state, track_info, |ti| {
+                ti.duration = core::time::Duration::from_secs(0); // TODO (*text).into();
+            }),
+            _ => (),
+        },
+        _ => (),
+    }
 }
 
 fn handle_hfpc<'d, M>(
     hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
-    phone: &Sender<'_, impl RawMutex, PhoneState>,
+    audio_state: &Sender<'_, impl RawMutex, AudioState>,
+    phone_call_state: &Sender<'_, impl RawMutex, PhoneCallState>,
+    phone_call_info: &Mutex<impl RawMutex, RefCell<PhoneCallInfo>>,
     event: HfpcEvent<'_>,
 ) -> usize
 where
@@ -179,15 +262,67 @@ where
     match event {
         HfpcEvent::ConnectionState { status, .. } => {
             match status {
-                client::ConnectionStatus::Disconnected => phone.send(PhoneState::Initialized),
                 client::ConnectionStatus::Connected | client::ConnectionStatus::SlcConnected => {
-                    phone.send(PhoneState::Connected)
+                    audio_state.send(AudioState::Connected)
                 }
+                client::ConnectionStatus::Disconnected => audio_state.send(AudioState::Initialized),
                 _ => (),
             }
 
             0
         }
+        HfpcEvent::AudioState { status, .. } => {
+            match status {
+                client::AudioStatus::Connected | client::AudioStatus::ConnectedMsbc => {
+                    audio_state.send(AudioState::Streaming)
+                }
+                client::AudioStatus::Disconnected => audio_state.send(AudioState::Suspended),
+                _ => (),
+            }
+
+            0
+        }
+        HfpcEvent::CallSetupState(state) if state != CallSetupStatus::Idle => {
+            hfpc.request_current_calls();
+
+            update_call_info(phone_call_state, phone_call_info, move |ci| match state {
+                CallSetupStatus::Idle => unreachable!(),
+                CallSetupStatus::Incoming => PhoneCallState::Ringing(ci.version),
+                CallSetupStatus::OutgoingDialing => PhoneCallState::Dialing(ci.version),
+                CallSetupStatus::OutgoingAlerting => PhoneCallState::DialingAlerting(ci.version),
+            });
+
+            0
+        }
+        HfpcEvent::CallState(active) => {
+            if active {
+                hfpc.request_current_calls();
+            }
+
+            update_call_info(phone_call_state, phone_call_info, |ci| {
+                if active {
+                    PhoneCallState::CallActive(ci.version)
+                } else {
+                    ci.reset();
+                    PhoneCallState::Idle
+                }
+            });
+
+            0
+        }
+        // HfpcEvent::CurrentCall { outgoing, status, number, .. } => {
+        //     match status {
+        //         CurrentCallStatus::Active => todo!(),
+        //         CurrentCallStatus::Held => todo!(),
+        //         CurrentCallStatus::Dialing => todo!(),
+        //         CurrentCallStatus::Alerting => todo!(),
+        //         CurrentCallStatus::Incoming => todo!(),
+        //         CurrentCallStatus::Waiting => todo!(),
+        //         CurrentCallStatus::HeldByResponseAndHold => todo!(),
+        //     }
+
+        //     0
+        // }
         HfpcEvent::RecvData(data) => {
             AUDIO_BUFFERS.lock(|buffers| {
                 buffers.borrow_mut().push_incoming(data, false, || {
@@ -204,45 +339,61 @@ where
     }
 }
 
-fn handle_avrcc<'d, M>(
-    avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
-    audio_state: &Mutex<impl RawMutex, RefCell<AudioState>>,
-    audio: &Sender<'_, impl RawMutex, AudioState>,
-    event: AvrccEvent<'_>,
-) where
+fn update_track_info(
+    audio_track_state: &Sender<'_, impl RawMutex, AudioTrackState>,
+    track_info: &Mutex<impl RawMutex, RefCell<TrackInfo>>,
+    mut f: impl FnMut(&mut TrackInfo),
+) {
+    track_info.lock(|ti| {
+        let mut ti = ti.borrow_mut();
+
+        f(&mut ti);
+
+        ti.version += 1;
+
+        audio_track_state.send(if ti.paused {
+            AudioTrackState::Paused
+        } else {
+            AudioTrackState::Playing
+        })
+    });
+}
+
+fn request_info<'d, M>(avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>)
+where
     M: BtClassicEnabled,
 {
-    match &event {
-        AvrccEvent::Connected(_) | AvrccEvent::Notification(_) => {
-            if matches!(event, AvrccEvent::Connected(_)) {
-                avrcc.request_capabilities(0).unwrap();
-            }
+    // TODO: Do it based on available capabilities
 
-            avrcc
-                .register_notification(1, NotificationType::PlaybackPosition, 1000)
-                .unwrap();
-            avrcc
-                .register_notification(2, NotificationType::Playback, 0)
-                .unwrap();
-            avrcc
-                .register_notification(3, NotificationType::TrackChanged, 0)
-                .unwrap();
-            avrcc
-                .request_metadata(
-                    4,
-                    MetadataId::Title
-                        | MetadataId::Artist
-                        | MetadataId::Album
-                        | MetadataId::PlayingTime,
-                )
-                .unwrap();
-            // avrcc
-            //     .register_notification(5, NotificationType::TrackStart, 0)
-            //     .unwrap();
-            // avrcc
-            //     .register_notification(6, NotificationType::TrackEnd, 0)
-            //     .unwrap();
-        }
-        _ => (),
-    }
+    avrcc
+        .register_notification(1, NotificationType::PlaybackPosition, 1000)
+        .unwrap();
+    avrcc
+        .register_notification(2, NotificationType::Playback, 0)
+        .unwrap();
+    avrcc
+        .register_notification(3, NotificationType::TrackChanged, 0)
+        .unwrap();
+    avrcc
+        .request_metadata(
+            4,
+            MetadataId::Title | MetadataId::Artist | MetadataId::Album | MetadataId::PlayingTime,
+        )
+        .unwrap();
+}
+
+fn update_call_info(
+    phone_call_state: &Sender<'_, impl RawMutex, PhoneCallState>,
+    call_info: &Mutex<impl RawMutex, RefCell<PhoneCallInfo>>,
+    mut f: impl FnMut(&mut PhoneCallInfo) -> PhoneCallState,
+) {
+    call_info.lock(|ci| {
+        let mut ci = ci.borrow_mut();
+
+        ci.version += 1;
+
+        let state = f(&mut ci);
+
+        phone_call_state.send(state)
+    });
 }
