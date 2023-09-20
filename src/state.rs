@@ -1,10 +1,19 @@
-use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
+use std::cell::Cell;
 
-use enumset::EnumSetType;
+use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex};
+use enumset::{EnumSet, EnumSetType};
+use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
+
+use crate::{
+    can::message::SteeringWheelButton,
+    displays::DisplayText,
+    service::ServiceLifecycle,
+    signal::{Receiver, SharedStateReceiver, SharedStateSpmcSignal, SpmcSignal},
+};
 
 pub type DisplayString = heapless::String<32>;
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum BtState {
     Uninitialized,
     Initialized,
@@ -18,7 +27,7 @@ impl BtState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum AudioState {
     Uninitialized,
     Initialized,
@@ -37,9 +46,10 @@ impl AudioState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct TrackInfo {
     pub version: u32,
+    pub state: AudioTrackState,
     pub artist: DisplayString,
     pub album: DisplayString,
     pub song: DisplayString,
@@ -52,6 +62,7 @@ impl TrackInfo {
     pub const fn new() -> Self {
         Self {
             version: 0,
+            state: AudioTrackState::Uninitialized,
             artist: DisplayString::new(),
             album: DisplayString::new(),
             song: DisplayString::new(),
@@ -71,7 +82,7 @@ impl TrackInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum AudioTrackState {
     Uninitialized,
     Initialized,
@@ -90,9 +101,10 @@ impl AudioTrackState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PhoneCallInfo {
     pub version: u32,
+    pub state: PhoneCallState,
     pub phone: DisplayString,
     pub duration: core::time::Duration,
 }
@@ -101,6 +113,7 @@ impl PhoneCallInfo {
     pub const fn new() -> Self {
         Self {
             version: 0,
+            state: PhoneCallState::Idle,
             phone: DisplayString::new(),
             duration: core::time::Duration::from_secs(0),
         }
@@ -112,7 +125,7 @@ impl PhoneCallInfo {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PhoneCallState {
     Idle,
     Dialing,
@@ -125,6 +138,17 @@ impl PhoneCallState {
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::Idle)
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum BtCommand {
+    Answer,
+    Reject,
+    Hangup,
+    Pause,
+    Resume,
+    NextTrack,
+    PreviousTrack,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -144,77 +168,79 @@ impl RadioState {
 #[derive(Debug, EnumSetType)]
 pub enum Service {
     Can,
-    AudioOutgoing,
-    AudioIncoming,
-    AudioState,
+    Microphone,
+    Speakers,
+    AudioMux,
     Bt,
     CockpitDisplay,
     RadioDisplay,
     Commands,
 }
 
-pub struct State<M, T>([Signal<M, T>; 8])
-where
-    M: RawMutex;
+pub struct State {
+    pub started_services: Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
+    pub start: SpmcSignal<NoopRawMutex, bool>,
+    pub bt: SpmcSignal<EspRawMutex, BtState>,
+    pub audio: SpmcSignal<EspRawMutex, AudioState>,
+    pub audio_track: SharedStateSpmcSignal<EspRawMutex, TrackInfo>,
+    pub phone: SpmcSignal<EspRawMutex, AudioState>,
+    pub phone_call: SharedStateSpmcSignal<EspRawMutex, PhoneCallInfo>,
+    pub button_commands: SpmcSignal<NoopRawMutex, BtCommand>,
+    pub radio_commands: SpmcSignal<NoopRawMutex, BtCommand>,
+    pub radio: SpmcSignal<NoopRawMutex, RadioState>,
+    pub buttons: SpmcSignal<NoopRawMutex, EnumSet<SteeringWheelButton>>,
+    pub cockpit_display: SharedStateSpmcSignal<NoopRawMutex, DisplayText>,
+    pub radio_display: SharedStateSpmcSignal<NoopRawMutex, DisplayText>,
+}
 
-impl<M, T> State<M, T>
-where
-    M: RawMutex,
-{
-    const INIT: Signal<M, T> = Signal::new();
-
+impl State {
     pub const fn new() -> Self {
-        Self([Self::INIT; 8])
+        Self {
+            started_services: Mutex::new(Cell::new(EnumSet::EMPTY)),
+            start: SpmcSignal::new(),
+            bt: SpmcSignal::new(),
+            audio: SpmcSignal::new(),
+            audio_track: SharedStateSpmcSignal::new(TrackInfo::new()),
+            phone: SpmcSignal::new(),
+            phone_call: SharedStateSpmcSignal::new(PhoneCallInfo::new()),
+            button_commands: SpmcSignal::new(),
+            radio_commands: SpmcSignal::new(),
+            radio: SpmcSignal::new(),
+            buttons: SpmcSignal::new(),
+            cockpit_display: SharedStateSpmcSignal::new(DisplayText::new()),
+            radio_display: SharedStateSpmcSignal::new(DisplayText::new()),
+        }
     }
 
-    pub fn receiver(&self, service: Service) -> Receiver<'_, M, T> {
-        let index = service as usize;
-
-        Receiver(&self.0[index])
-    }
-
-    pub fn sender(&self) -> Sender<'_, M, T> {
-        Sender(&self.0)
-    }
-}
-
-pub struct Receiver<'a, M, T>(&'a Signal<M, T>)
-where
-    M: RawMutex;
-
-impl<'a, M, T> Receiver<'a, M, T>
-where
-    M: RawMutex,
-    T: Send,
-{
-    pub async fn recv(&self) -> T {
-        self.0.wait().await
-    }
-}
-
-pub struct Sender<'a, M, T>(&'a [Signal<M, T>])
-where
-    M: RawMutex;
-
-impl<'a, M, T> Sender<'a, M, T>
-where
-    M: RawMutex,
-    T: Send + Clone,
-{
-    pub fn send(&self, value: T) {
-        for signal in self.0 {
-            signal.signal(value.clone());
+    pub fn subscription(&self, service: Service) -> BusSubscription<'_> {
+        BusSubscription {
+            service: ServiceLifecycle::new(service, &self.start, &self.started_services),
+            bt: self.bt.receiver(service),
+            audio: self.audio.receiver(service),
+            audio_track: self.audio_track.receiver(service),
+            phone: self.phone.receiver(service),
+            phone_call: self.phone_call.receiver(service),
+            button_commands: self.button_commands.receiver(service),
+            radio_commands: self.radio_commands.receiver(service),
+            radio: self.radio.receiver(service),
+            buttons: self.buttons.receiver(service),
+            cockpit_display: self.cockpit_display.receiver(service),
+            radio_display: self.radio_display.receiver(service),
         }
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum Command {
-    Answer,
-    Reject,
-    Hangup,
-    Pause,
-    Resume,
-    NextTrack,
-    PreviousTrack,
+pub struct BusSubscription<'a> {
+    pub service: ServiceLifecycle<'a, NoopRawMutex>,
+    pub bt: Receiver<'a, EspRawMutex, BtState>,
+    pub audio: Receiver<'a, EspRawMutex, AudioState>,
+    pub audio_track: SharedStateReceiver<'a, EspRawMutex, TrackInfo>,
+    pub phone: Receiver<'a, EspRawMutex, AudioState>,
+    pub phone_call: SharedStateReceiver<'a, EspRawMutex, PhoneCallInfo>,
+    pub button_commands: Receiver<'a, NoopRawMutex, BtCommand>,
+    pub radio_commands: Receiver<'a, NoopRawMutex, BtCommand>,
+    pub radio: Receiver<'a, NoopRawMutex, RadioState>,
+    pub buttons: Receiver<'a, NoopRawMutex, EnumSet<SteeringWheelButton>>,
+    pub cockpit_display: SharedStateReceiver<'a, NoopRawMutex, DisplayText>,
+    pub radio_display: SharedStateReceiver<'a, NoopRawMutex, DisplayText>,
 }

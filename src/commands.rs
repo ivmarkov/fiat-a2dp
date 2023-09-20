@@ -1,27 +1,20 @@
 use embassy_futures::select::{select4, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
-use enumset::EnumSet;
 
 use crate::{
     can::message::SteeringWheelButton,
     error::Error,
-    start::ServiceLifecycle,
-    state::{AudioState, AudioTrackState, Command, PhoneCallState, RadioState, Receiver, Sender},
+    signal::Sender,
+    state::{AudioState, AudioTrackState, BtCommand, BusSubscription, PhoneCallState, RadioState},
 };
 
 pub async fn process(
-    service: ServiceLifecycle<'_, impl RawMutex>,
-    audio: Receiver<'_, impl RawMutex, AudioState>,
-    audio_track: Receiver<'_, impl RawMutex, AudioTrackState>,
-    phone: Receiver<'_, impl RawMutex, AudioState>,
-    phone_call: Receiver<'_, impl RawMutex, PhoneCallState>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
-    buttons: Receiver<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
-    command: Sender<'_, impl RawMutex, Command>,
+    bus: BusSubscription<'_>,
+    button_commands: Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
     loop {
-        service.starting();
-        service.started();
+        bus.service.starting();
+        bus.service.started();
 
         let mut saudio = AudioState::Uninitialized;
         let mut strack = AudioTrackState::Uninitialized;
@@ -31,41 +24,34 @@ pub async fn process(
 
         loop {
             match select4(
-                service.wait_stop(),
+                bus.service.wait_stop(),
                 select4(
-                    audio.recv(),
-                    audio_track.recv(),
-                    phone.recv(),
-                    phone_call.recv(),
+                    bus.audio.recv(),
+                    bus.audio_track.recv(),
+                    bus.phone.recv(),
+                    bus.phone_call.recv(),
                 ),
-                radio.recv(),
-                buttons.recv(),
+                bus.radio.recv(),
+                bus.buttons.recv(),
             )
             .await
             {
                 Either4::First(_) => break,
                 Either4::Second(Either4::First(new)) => saudio = new,
-                Either4::Second(Either4::Second(new)) => strack = new,
-                Either4::Second(Either4::Third(new)) => sphone = new,
-                Either4::Second(Either4::Fourth(new)) => scall = new,
-                Either4::Third(new) => {
-                    if sradio != new {
-                        if saudio.is_active() && !sphone.is_active() {
-                            match new {
-                                RadioState::BtActive => command.send(Command::Resume),
-                                _ => command.send(Command::Pause),
-                            }
-                        }
-
-                        sradio = new;
-                    }
+                Either4::Second(Either4::Second(_)) => {
+                    strack = bus.audio_track.state(|track| track.state)
                 }
+                Either4::Second(Either4::Third(new)) => sphone = new,
+                Either4::Second(Either4::Fourth(_)) => {
+                    scall = bus.phone_call.state(|call| call.state)
+                }
+                Either4::Third(new) => sradio = new,
                 Either4::Fourth(buttons) => {
                     if matches!(scall, PhoneCallState::Ringing) {
                         if buttons.contains(SteeringWheelButton::Menu) {
-                            command.send(Command::Answer);
+                            button_commands.send(BtCommand::Answer);
                         } else if buttons.contains(SteeringWheelButton::Windows) {
-                            command.send(Command::Reject);
+                            button_commands.send(BtCommand::Reject);
                         }
                     } else if matches!(
                         scall,
@@ -76,27 +62,27 @@ pub async fn process(
                         if buttons.contains(SteeringWheelButton::Menu)
                             | buttons.contains(SteeringWheelButton::Windows)
                         {
-                            command.send(Command::Hangup);
+                            button_commands.send(BtCommand::Hangup);
                         }
                     } else if sradio.is_bt_active() && !sphone.is_active() {
                         if saudio.is_connected() {
                             if buttons.contains(SteeringWheelButton::Mute) {
                                 if matches!(saudio, AudioState::Streaming) {
-                                    command.send(Command::Pause);
+                                    button_commands.send(BtCommand::Pause);
                                 } else if matches!(
                                     saudio,
                                     AudioState::Connected | AudioState::Suspended
                                 ) {
-                                    command.send(Command::Resume);
+                                    button_commands.send(BtCommand::Resume);
                                 }
                             } else if buttons.contains(SteeringWheelButton::Up)
                                 && strack.is_connected()
                             {
-                                command.send(Command::PreviousTrack);
+                                button_commands.send(BtCommand::PreviousTrack);
                             } else if buttons.contains(SteeringWheelButton::Down)
                                 && strack.is_connected()
                             {
-                                command.send(Command::NextTrack);
+                                button_commands.send(BtCommand::NextTrack);
                             }
                         }
                     }
@@ -104,6 +90,6 @@ pub async fn process(
             }
         }
 
-        service.wait_start().await?;
+        bus.service.wait_start().await?;
     }
 }

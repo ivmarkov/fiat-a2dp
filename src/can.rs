@@ -1,13 +1,9 @@
-use core::cell::RefCell;
 use core::cmp::min;
 
-use embassy_futures::select::{select, select_slice, Either};
+use embassy_futures::select::{select, select3, select_slice, Either3};
 
 use embassy_sync::{
-    blocking_mutex::{
-        raw::{NoopRawMutex, RawMutex},
-        Mutex,
-    },
+    blocking_mutex::raw::{NoopRawMutex, RawMutex},
     signal::Signal,
 };
 
@@ -24,9 +20,10 @@ use esp_idf_svc::hal::{
 use crate::{
     displays::DisplayText,
     select_spawn::SelectSpawn,
-    state::{AudioState, RadioState, Receiver, Sender},
+    signal::{Receiver, Sender, SharedStateReceiver},
+    state::{AudioState, BtCommand, BusSubscription, RadioState},
 };
-use crate::{error::Error, start::ServiceLifecycle};
+use crate::{error::Error, service::ServiceLifecycle};
 
 use self::message::{
     BodyComputer, Bt, Display, Message, Proxi, Publisher, RadioSource, SteeringWheel,
@@ -586,22 +583,16 @@ pub mod message {
 }
 
 pub async fn process(
-    service: ServiceLifecycle<'_, impl RawMutex>,
+    bus: BusSubscription<'_>,
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
-    _audio: Receiver<'_, impl RawMutex, AudioState>,
-    phone: Receiver<'_, impl RawMutex, AudioState>,
-    cockpit_display: &Signal<impl RawMutex, ()>,
-    cockpit_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
-    radio_display: &Signal<impl RawMutex, ()>,
-    radio_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
-    radio_out: Sender<'_, impl RawMutex, RadioState>,
+    radio: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    radio_commands: Sender<'_, impl RawMutex, BtCommand>,
     start: Sender<'_, impl RawMutex, bool>,
 ) -> Result<(), Error> {
-    service.starting();
+    bus.service.starting();
 
     let mut driver = create(can, tx, rx)?;
 
@@ -613,19 +604,19 @@ pub async fn process(
 
     driver.start()?;
 
-    service.started();
+    bus.service.started();
 
     let res = SelectSpawn::run(core::future::pending())
-        .chain(process_radio_out(phone, radio, send_radio_switch))
-        .chain(process_display(
-            radio_display,
-            radio_display_state,
-            true,
-            send_radio_display,
+        .chain(process_radio_out(
+            bus.audio,
+            bus.phone,
+            bus.radio,
+            radio_commands,
+            send_radio_switch,
         ))
+        .chain(process_display(bus.radio_display, true, send_radio_display))
         .chain(process_display(
-            cockpit_display,
-            cockpit_display_state,
+            bus.cockpit_display,
             false,
             send_cockpit_display,
         ))
@@ -641,18 +632,18 @@ pub async fn process(
         ))
         .chain(process_recv(
             &driver,
-            &service,
+            &bus.service,
             start,
             send_status,
             send_proxi,
-            radio_out,
+            radio,
             buttons,
         ))
         .await;
 
     driver.stop()?;
 
-    service.stopped();
+    bus.service.stopped();
 
     res
 }
@@ -666,31 +657,46 @@ fn create<'d>(
 }
 
 async fn process_radio_out(
+    audio: Receiver<'_, impl RawMutex, AudioState>,
     phone: Receiver<'_, impl RawMutex, AudioState>,
     radio: Receiver<'_, impl RawMutex, RadioState>,
+    radio_commands: Sender<'_, impl RawMutex, BtCommand>,
     radio_switch_out: &Signal<impl RawMutex, Frame>,
 ) -> Result<(), Error> {
     let mut sradio = RadioState::Unknown;
+    let mut sphone = AudioState::Uninitialized;
+    let mut saudio = AudioState::Uninitialized;
 
     loop {
-        let ret = select(radio.recv(), phone.recv()).await;
+        let ret = select3(radio.recv(), phone.recv(), audio.recv()).await;
 
         match ret {
-            Either::First(new) => sradio = new,
-            Either::Second(phone) => {
-                if phone.is_active() && !sradio.is_bt_active() {
+            Either3::First(new) => {
+                sradio = new;
+
+                if saudio.is_active() && !sphone.is_active() {
+                    match new {
+                        RadioState::BtActive => radio_commands.send(BtCommand::Resume),
+                        _ => radio_commands.send(BtCommand::Pause),
+                    }
+                }
+            }
+            Either3::Second(new) => {
+                sphone = new;
+
+                if sphone.is_active() && !sradio.is_bt_active() {
                     radio_switch_out.signal(as_frame(Topic::Bt(Bt::Phone)));
                 }
 
                 // TODO: Switch back on phone disconnect
             }
+            Either3::Third(new) => saudio = new,
         }
     }
 }
 
 async fn process_display(
-    new_text: &Signal<impl RawMutex, ()>,
-    text: &Mutex<impl RawMutex, RefCell<DisplayText>>,
+    text: SharedStateReceiver<'_, impl RawMutex, DisplayText>,
     for_radio: bool,
     display_out: &Signal<impl RawMutex, Frame>,
 ) -> Result<(), Error> {
@@ -699,11 +705,9 @@ async fn process_display(
     let mut processing = false;
 
     loop {
-        select(new_text.wait(), Timer::after(Duration::from_millis(10))).await;
+        select(text.recv(), Timer::after(Duration::from_millis(10))).await;
 
-        text.lock(|text| {
-            let text = text.borrow();
-
+        text.state(|text| {
             if Some(text.version) != version {
                 version = Some(text.version);
                 offset = 0;

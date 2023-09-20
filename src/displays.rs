@@ -1,15 +1,14 @@
-use core::{cell::RefCell, fmt::Write};
+use core::fmt::Write;
 
 use embassy_futures::select::{select4, Either4};
-use embassy_sync::{
-    blocking_mutex::{raw::RawMutex, Mutex},
-    signal::Signal,
-};
+use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use crate::{
     error::Error,
-    start::ServiceLifecycle,
-    state::{AudioTrackState, PhoneCallInfo, PhoneCallState, RadioState, Receiver, TrackInfo},
+    signal::SharedStateSender,
+    state::{
+        AudioTrackState, BusSubscription, PhoneCallInfo, PhoneCallState, RadioState, TrackInfo,
+    },
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -76,18 +75,12 @@ impl DisplayText {
 // }
 
 pub async fn process_radio(
-    service: ServiceLifecycle<'_, impl RawMutex>,
-    audio_track: Receiver<'_, impl RawMutex, AudioTrackState>,
-    track_info: &Mutex<impl RawMutex, RefCell<TrackInfo>>,
-    phone_call: Receiver<'_, impl RawMutex, PhoneCallState>,
-    call_info: &Mutex<impl RawMutex, RefCell<PhoneCallInfo>>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
-    radio_display: &Mutex<impl RawMutex, RefCell<DisplayText>>,
-    radio_display_out: &Signal<impl RawMutex, ()>,
+    bus: BusSubscription<'_>,
+    radio_display: SharedStateSender<'_, impl RawMutex, DisplayText>,
 ) -> Result<(), Error> {
     loop {
-        service.starting();
-        service.started();
+        bus.service.starting();
+        bus.service.started();
 
         let mut sradio = RadioState::Unknown;
         let mut sphone = PhoneCallState::Idle;
@@ -95,37 +88,39 @@ pub async fn process_radio(
 
         loop {
             let ret = select4(
-                service.wait_stop(),
-                radio.recv(),
-                phone_call.recv(),
-                audio_track.recv(),
+                bus.service.wait_stop(),
+                bus.radio.recv(),
+                bus.phone_call.recv(),
+                bus.audio_track.recv(),
             )
             .await;
 
             match ret {
                 Either4::First(_) => break,
                 Either4::Second(new) => sradio = new,
-                Either4::Third(new) => sphone = new,
-                Either4::Fourth(new) => saudio = new,
+                Either4::Third(_) => sphone = bus.phone_call.state(|call| call.state),
+                Either4::Fourth(_) => saudio = bus.audio_track.state(|track| track.state),
             }
 
             if sradio.is_bt_active() {
                 if sphone.is_active() {
-                    call_info.lock(|ci| {
-                        radio_display
-                            .lock(|display| display.borrow_mut().update_phone_info(&ci.borrow()));
-                        radio_display_out.signal(());
+                    bus.phone_call.state(|call| {
+                        radio_display.modify(|display| {
+                            display.update_phone_info(&call);
+                            true
+                        });
                     });
                 } else if saudio.is_active() {
-                    track_info.lock(|ti| {
-                        radio_display
-                            .lock(|display| display.borrow_mut().update_track_info(&ti.borrow()));
-                        radio_display_out.signal(());
+                    bus.audio_track.state(|track| {
+                        radio_display.modify(|display| {
+                            display.update_track_info(&track);
+                            true
+                        });
                     });
                 }
             }
         }
 
-        service.wait_start().await?;
+        bus.service.wait_start().await?;
     }
 }

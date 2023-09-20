@@ -8,7 +8,8 @@ use log::info;
 
 use crate::{
     error::Error,
-    state::{Receiver, Service, State},
+    signal::{Receiver, SpmcSignal},
+    state::Service,
 };
 
 pub struct ServiceLifecycle<'d, M>
@@ -26,7 +27,7 @@ where
 {
     pub fn new(
         service: Service,
-        start_state: &'d State<M, bool>,
+        start_state: &'d SpmcSignal<M, bool>,
         started_services: &'d Mutex<M, Cell<EnumSet<Service>>>,
     ) -> Self {
         Self {

@@ -2,7 +2,6 @@ use core::cell::RefCell;
 
 use embassy_futures::select::{select, Either};
 
-use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
 
 use esp_idf_svc::hal::i2s::I2sTxSupported;
@@ -27,8 +26,7 @@ use log::info;
 use crate::error::Error;
 use crate::ringbuf::RingBuf;
 use crate::select_spawn::SelectSpawn;
-use crate::start::ServiceLifecycle;
-use crate::state::{AudioState, Receiver};
+use crate::state::BusSubscription;
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -131,16 +129,13 @@ pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
-pub async fn process_state(
-    service: ServiceLifecycle<'_, impl RawMutex>,
-    phone_audio: Receiver<'_, impl RawMutex, AudioState>,
-) -> Result<(), Error> {
+pub async fn process_audio_mux(bus: BusSubscription<'_>) -> Result<(), Error> {
     loop {
-        service.starting();
-        service.started();
+        bus.service.starting();
+        bus.service.started();
 
         loop {
-            let state = select(service.wait_stop(), phone_audio.recv()).await;
+            let state = select(bus.service.wait_stop(), bus.phone.recv()).await;
 
             match state {
                 Either::First(other) => break other,
@@ -152,12 +147,12 @@ pub async fn process_state(
             }
         }?;
 
-        service.wait_start().await?;
+        bus.service.wait_start().await?;
     }
 }
 
-pub async fn process_outgoing(
-    service: ServiceLifecycle<'_, impl RawMutex>,
+pub async fn process_microphone(
+    bus: BusSubscription<'_>,
     mut adc1: impl Peripheral<P = ADC1>,
     mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>>,
     mut i2s0: impl Peripheral<P = I2S0>,
@@ -166,7 +161,7 @@ pub async fn process_outgoing(
 ) -> Result<(), Error> {
     loop {
         {
-            service.starting();
+            bus.service.starting();
 
             let mut driver = AdcContDriver::new(
                 &mut adc1,
@@ -180,10 +175,14 @@ pub async fn process_outgoing(
 
             driver.start()?;
 
-            service.started();
+            bus.service.started();
 
-            let res = SelectSpawn::run(service.wait_stop())
-                .chain(process_outgoing_read(&mut driver, buf, &notify_outgoing))
+            let res = SelectSpawn::run(bus.service.wait_stop())
+                .chain(process_microphone_reading(
+                    &mut driver,
+                    buf,
+                    &notify_outgoing,
+                ))
                 .await;
 
             driver.stop()?;
@@ -191,11 +190,11 @@ pub async fn process_outgoing(
             res?;
         }
 
-        service.wait_start().await?;
+        bus.service.wait_start().await?;
     }
 }
 
-async fn process_outgoing_read<'d>(
+async fn process_microphone_reading<'d>(
     driver: &mut AdcContDriver<'d>,
     adc_buf: &mut [AdcMeasurement],
     notify_outgoing: impl Fn(),
@@ -249,8 +248,8 @@ async fn process_outgoing_read<'d>(
     }
 }
 
-pub async fn process_incoming(
-    service: ServiceLifecycle<'_, impl RawMutex>,
+pub async fn process_speakers(
+    bus: BusSubscription<'_>,
     mut i2s: impl Peripheral<P = impl I2s>,
     mut bclk: impl Peripheral<P = impl InputPin + OutputPin>,
     mut dout: impl Peripheral<P = impl OutputPin>,
@@ -259,7 +258,7 @@ pub async fn process_incoming(
 ) -> Result<(), Error> {
     loop {
         {
-            service.starting();
+            bus.service.starting();
 
             let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
 
@@ -270,11 +269,11 @@ pub async fn process_incoming(
 
                 driver.tx_enable()?;
 
-                service.started();
+                bus.service.started();
 
                 let res = select(
-                    service.wait_stop(),
-                    process_incoming_read(&mut driver, buf, &mut a2dp_conf),
+                    bus.service.wait_stop(),
+                    process_speakers_writing(&mut driver, buf, &mut a2dp_conf),
                 )
                 .await;
 
@@ -287,11 +286,11 @@ pub async fn process_incoming(
             }?;
         }
 
-        service.wait_start().await?;
+        bus.service.wait_start().await?;
     }
 }
 
-async fn process_incoming_read<'d>(
+async fn process_speakers_writing<'d>(
     driver: &mut I2sDriver<'d, impl I2sTxSupported>,
     buf: &mut [u8],
     a2dp_conf: &mut bool,
