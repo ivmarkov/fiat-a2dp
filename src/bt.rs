@@ -1,15 +1,11 @@
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
-use enumset::EnumSet;
-
 use esp_idf_svc::bt::a2dp::{AudioStatus, ConnectionStatus};
-use esp_idf_svc::bt::avrc::{Notification, PlaybackStatus};
+use esp_idf_svc::bt::avrc::{KeyCode, Notification, PlaybackStatus};
 use esp_idf_svc::bt::hfp::client::{self, CallSetupStatus};
-use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
-use esp_idf_svc::sys::EspError;
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, EspA2dp, SinkEnabled},
@@ -31,27 +27,31 @@ use log::*;
 
 use crate::audio::AUDIO_BUFFERS;
 
-use crate::start::{set_service_started, wait_start};
+use crate::error::Error;
+use crate::select_spawn::SelectSpawn;
+use crate::start::ServiceLifecycle;
 use crate::state::{
-    AudioState, AudioTrackState, BtState, PhoneCallInfo, PhoneCallState, Receiver, Sender, Service,
+    AudioState, AudioTrackState, BtState, Command, PhoneCallInfo, PhoneCallState, Receiver, Sender,
     TrackInfo,
 };
 
 pub async fn process(
+    service: ServiceLifecycle<'_, impl RawMutex>,
     mut modem: impl Peripheral<P = impl BluetoothModemPeripheral>,
     nvs: EspDefaultNvsPartition,
-    start: Receiver<'_, impl RawMutex, bool>,
-    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    bt: Sender<'_, EspRawMutex, BtState>,
+    bt: Sender<'_, impl RawMutex + Sync, BtState>,
     audio_state: Sender<'_, impl RawMutex + Sync, AudioState>,
     audio_track_state: Sender<'_, impl RawMutex + Sync, AudioTrackState>,
     track_info: &Mutex<impl RawMutex + Sync, RefCell<TrackInfo>>,
     phone_state: Sender<'_, impl RawMutex + Sync, AudioState>,
     phone_call_state: Sender<'_, impl RawMutex + Sync, PhoneCallState>,
     phone_call_info: &Mutex<impl RawMutex + Sync, RefCell<PhoneCallInfo>>,
-) -> Result<(), EspError> {
+    commands: Receiver<'_, impl RawMutex, Command>,
+) -> Result<(), Error> {
     loop {
         {
+            service.starting();
+
             let driver = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
 
             driver.set_device_name("Fiat")?;
@@ -115,18 +115,42 @@ pub async fn process(
 
             a2dp.set_delay(core::time::Duration::from_millis(150))?;
 
-            set_service_started(started_services, Service::Bt, true);
-            wait_start(&start, false).await?;
+            service.started();
+
+            SelectSpawn::run(service.wait_stop())
+                .chain(process_commands(&commands, &a2dp, &avrcc, &hfpc))
+                .await?;
         }
 
-        set_service_started(started_services, Service::Bt, false);
-        wait_start(&start, true).await?;
+        service.wait_start().await?;
+    }
+}
+
+async fn process_commands<'d, M>(
+    commands: &Receiver<'_, impl RawMutex, Command>,
+    _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
+    avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
+    hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
+) -> Result<(), Error>
+where
+    M: BtClassicEnabled,
+{
+    loop {
+        match commands.recv().await {
+            Command::Answer => hfpc.answer()?,
+            Command::Reject => hfpc.reject()?,
+            Command::Hangup => hfpc.reject()?,
+            Command::Pause => avrcc.send_passthrough(0, KeyCode::Pause, true)?,
+            Command::Resume => avrcc.send_passthrough(0, KeyCode::Play, true)?,
+            Command::NextTrack => avrcc.send_passthrough(0, KeyCode::ChannelUp, true)?,
+            Command::PreviousTrack => avrcc.send_passthrough(0, KeyCode::ChannelDown, true)?,
+        }
     }
 }
 
 fn handle_gap<'d, M>(
     gap: &EspGap<'d, M, &BtDriver<'d, M>>,
-    bt: &Sender<'_, impl RawMutex, BtState>,
+    _bt: &Sender<'_, impl RawMutex, BtState>,
     event: GapEvent<'_>,
 ) where
     M: BtClassicEnabled,
@@ -212,7 +236,6 @@ fn handle_avrcc<'d, M>(
                             ti.paused = matches!(status, PlaybackStatus::Paused);
                         })
                     }
-                    PlaybackStatus::Paused => todo!(),
                     _ => (),
                 },
                 Notification::TrackChanged
@@ -283,25 +306,25 @@ where
             0
         }
         HfpcEvent::CallSetupState(state) if state != CallSetupStatus::Idle => {
-            hfpc.request_current_calls();
+            hfpc.request_current_calls().unwrap();
 
-            update_call_info(phone_call_state, phone_call_info, move |ci| match state {
+            update_call_info(phone_call_state, phone_call_info, move |_ci| match state {
                 CallSetupStatus::Idle => unreachable!(),
-                CallSetupStatus::Incoming => PhoneCallState::Ringing(ci.version),
-                CallSetupStatus::OutgoingDialing => PhoneCallState::Dialing(ci.version),
-                CallSetupStatus::OutgoingAlerting => PhoneCallState::DialingAlerting(ci.version),
+                CallSetupStatus::Incoming => PhoneCallState::Ringing,
+                CallSetupStatus::OutgoingDialing => PhoneCallState::Dialing,
+                CallSetupStatus::OutgoingAlerting => PhoneCallState::DialingAlerting,
             });
 
             0
         }
         HfpcEvent::CallState(active) => {
             if active {
-                hfpc.request_current_calls();
+                hfpc.request_current_calls().unwrap();
             }
 
             update_call_info(phone_call_state, phone_call_info, |ci| {
                 if active {
-                    PhoneCallState::CallActive(ci.version)
+                    PhoneCallState::CallActive
                 } else {
                     ci.reset();
                     PhoneCallState::Idle

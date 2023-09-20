@@ -1,16 +1,8 @@
-use std::cell::RefCell;
-
-use embassy_sync::{
-    blocking_mutex::{raw::RawMutex, Mutex},
-    signal::Signal,
-};
+use embassy_sync::{blocking_mutex::raw::RawMutex, signal::Signal};
 
 use enumset::EnumSetType;
-use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 pub type DisplayString = heapless::String<32>;
-
-pub type StateVersion = u32;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum BtState {
@@ -123,10 +115,10 @@ impl PhoneCallInfo {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PhoneCallState {
     Idle,
-    Dialing(StateVersion),
-    DialingAlerting(StateVersion),
-    Ringing(StateVersion),
-    CallActive(StateVersion),
+    Dialing,
+    DialingAlerting,
+    Ringing,
+    CallActive,
 }
 
 impl PhoneCallState {
@@ -135,7 +127,7 @@ impl PhoneCallState {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RadioState {
     Unknown,
     Fm,
@@ -156,10 +148,12 @@ pub enum Service {
     AudioIncoming,
     AudioState,
     Bt,
-    Display,
+    CockpitDisplay,
+    RadioDisplay,
+    Commands,
 }
 
-pub struct State<M, T>([Signal<M, T>; 6])
+pub struct State<M, T>([Signal<M, T>; 8])
 where
     M: RawMutex;
 
@@ -170,7 +164,7 @@ where
     const INIT: Signal<M, T> = Signal::new();
 
     pub const fn new() -> Self {
-        Self([Self::INIT; 6])
+        Self([Self::INIT; 8])
     }
 
     pub fn receiver(&self, service: Service) -> Receiver<'_, M, T> {
@@ -212,4 +206,15 @@ where
             signal.signal(value.clone());
         }
     }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum Command {
+    Answer,
+    Reject,
+    Hangup,
+    Pause,
+    Resume,
+    NextTrack,
+    PreviousTrack,
 }

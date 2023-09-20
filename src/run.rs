@@ -1,6 +1,5 @@
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::mem::MaybeUninit;
-use std::cell::RefCell;
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
@@ -9,16 +8,17 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use enumset::EnumSet;
 
-use esp_idf_svc::hal::sys::EspError;
 use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
 
-use crate::can::DisplayText;
+use crate::displays::DisplayText;
+use crate::error::Error;
+use crate::start::ServiceLifecycle;
 use crate::state::{PhoneCallInfo, Service, State, TrackInfo};
-use crate::{audio, bt, can, display};
+use crate::{audio, bt, can, commands, displays};
 
 static TRACK_INFO: Mutex<EspRawMutex, RefCell<TrackInfo>> =
     Mutex::new(RefCell::new(TrackInfo::new()));
@@ -30,7 +30,7 @@ static COCKPIT_DISPLAY_TEXT: Mutex<EspRawMutex, RefCell<DisplayText>> =
 static RADIO_DISPLAY_TEXT: Mutex<EspRawMutex, RefCell<DisplayText>> =
     Mutex::new(RefCell::new(DisplayText::new()));
 
-pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
+pub fn run(peripherals: Peripherals) -> Result<(), Error> {
     let modem = peripherals.modem;
 
     let adc1 = peripherals.adc1;
@@ -48,8 +48,8 @@ pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
 
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let executor = EspExecutor::<8, _>::new();
-    let mut tasks = heapless::Vec::<_, 8>::new();
+    let executor = EspExecutor::<16, _>::new();
+    let mut tasks = heapless::Vec::<_, 16>::new();
 
     let mut adc_buf = MaybeUninit::<[AdcMeasurement; 1000]>::uninit();
     let mut i2s_buf = MaybeUninit::<[u8; 4000]>::uninit();
@@ -67,6 +67,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
     let phone_call_state = &State::<EspRawMutex, _>::new();
     let radio_state = &State::<NoopRawMutex, _>::new();
     let buttons_state = &State::<NoopRawMutex, _>::new();
+    let commands_state = &State::<NoopRawMutex, _>::new();
 
     let cockpit_display = &Signal::<NoopRawMutex, _>::new();
     let radio_display = &Signal::<NoopRawMutex, _>::new();
@@ -74,10 +75,9 @@ pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
     executor
         .spawn_local_collect(
             bt::process(
+                ServiceLifecycle::new(Service::Bt, start_state, started_services),
                 modem,
                 nvs,
-                start_state.receiver(Service::Bt),
-                started_services,
                 bt_state.sender(),
                 audio_state.sender(),
                 audio_track_state.sender(),
@@ -85,77 +85,84 @@ pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
                 phone_state.sender(),
                 phone_call_state.sender(),
                 &PHONE_CALL_INFO,
+                commands_state.receiver(Service::Bt),
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
         .spawn_local_collect(
             audio::process_state(
+                ServiceLifecycle::new(Service::AudioState, start_state, started_services),
                 phone_state.receiver(Service::AudioState),
-                start_state.receiver(Service::AudioState),
-                started_services,
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
         .spawn_local_collect(
             audio::process_outgoing(
+                ServiceLifecycle::new(Service::AudioOutgoing, start_state, started_services),
                 adc1,
                 adc_pin,
                 i2s0,
                 adc_buf,
                 || {},
-                start_state.receiver(Service::AudioOutgoing),
-                started_services,
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
         .spawn_local_collect(
             audio::process_incoming(
+                ServiceLifecycle::new(Service::AudioIncoming, start_state, started_services),
                 i2s,
                 i2s_bclk,
                 i2s_dout,
                 i2s_ws,
                 i2s_buf,
-                start_state.receiver(Service::AudioIncoming),
-                started_services,
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
         .spawn_local_collect(
             can::process(
+                ServiceLifecycle::new(Service::Can, start_state, started_services),
                 can,
                 tx,
                 rx,
-                start_state.sender(),
-                started_services,
                 audio_state.receiver(Service::Can),
                 phone_state.receiver(Service::Can),
                 cockpit_display,
                 &COCKPIT_DISPLAY_TEXT,
                 radio_display,
                 &RADIO_DISPLAY_TEXT,
+                radio_state.receiver(Service::Can),
                 radio_state.sender(),
                 buttons_state.sender(),
+                start_state.sender(),
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
         .spawn_local_collect(
-            display::process(
-                audio_track_state.receiver(Service::Display),
+            displays::process_radio(
+                ServiceLifecycle::new(Service::RadioDisplay, start_state, started_services),
+                audio_track_state.receiver(Service::RadioDisplay),
                 &TRACK_INFO,
-                phone_call_state.receiver(Service::Display),
+                phone_call_state.receiver(Service::RadioDisplay),
                 &PHONE_CALL_INFO,
-                radio_state.receiver(Service::Display),
+                radio_state.receiver(Service::RadioDisplay),
                 &RADIO_DISPLAY_TEXT,
                 radio_display,
             ),
             &mut tasks,
-        )
-        .unwrap()
+        )?
+        .spawn_local_collect(
+            commands::process(
+                ServiceLifecycle::new(Service::Commands, start_state, started_services),
+                audio_state.receiver(Service::Commands),
+                audio_track_state.receiver(Service::Commands),
+                phone_state.receiver(Service::Commands),
+                phone_call_state.receiver(Service::Commands),
+                radio_state.receiver(Service::Commands),
+                buttons_state.receiver(Service::Commands),
+                commands_state.sender(),
+            ),
+            &mut tasks,
+        )?
         .spawn_local_collect(
             async move {
                 loop {
@@ -169,8 +176,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), EspError> {
                 Ok(())
             },
             &mut tasks,
-        )
-        .unwrap();
+        )?;
 
     executor.run_tasks(|| true, tasks);
 

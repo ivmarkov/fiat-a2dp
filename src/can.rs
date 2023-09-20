@@ -1,6 +1,5 @@
-use core::cell::Cell;
+use core::cell::RefCell;
 use core::cmp::min;
-use std::{cell::RefCell, fmt::Write};
 
 use embassy_futures::select::{select, select_slice, Either};
 
@@ -16,25 +15,18 @@ use embassy_time::{Duration, Timer};
 
 use enumset::EnumSet;
 
-use esp_idf_svc::{
-    hal::{
-        can::{AsyncCanDriver, CanConfig, Frame, OwnedAsyncCanDriver, CAN},
-        gpio::{InputPin, OutputPin},
-        peripheral::Peripheral,
-        task::embassy_sync::EspRawMutex,
-    },
-    sys::EspError,
+use esp_idf_svc::hal::{
+    can::{AsyncCanDriver, CanConfig, Frame, OwnedAsyncCanDriver, CAN},
+    gpio::{InputPin, OutputPin},
+    peripheral::Peripheral,
 };
-
-use log::info;
 
 use crate::{
+    displays::DisplayText,
     select_spawn::SelectSpawn,
-    start::get_started_services,
-    state::{
-        AudioState, PhoneCallInfo, RadioState, Receiver, Sender, Service, StateVersion, TrackInfo,
-    },
+    state::{AudioState, RadioState, Receiver, Sender},
 };
+use crate::{error::Error, start::ServiceLifecycle};
 
 use self::message::{
     BodyComputer, Bt, Display, Message, Proxi, Publisher, RadioSource, SteeringWheel,
@@ -593,89 +585,38 @@ pub mod message {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct DisplayText {
-    pub version: StateVersion,
-    pub text: heapless::String<32>,
-}
-
-impl DisplayText {
-    pub const fn new() -> Self {
-        Self {
-            version: 0,
-            text: heapless::String::new(),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.version += 1;
-        self.text.clear();
-    }
-
-    pub fn update_phone_info(&mut self, phone: &PhoneCallInfo) {
-        self.version += 1;
-        self.text.clear();
-
-        let secs = phone.duration.as_secs();
-
-        let mins = secs / 60;
-        let secs = secs % 60;
-
-        write!(&mut self.text, "{} {}:{}", phone.phone, mins, secs).unwrap();
-    }
-
-    pub fn update_track_info(&mut self, track: &TrackInfo) {
-        self.version += 1;
-        self.text.clear();
-
-        let secs = track.offset.as_secs();
-
-        let mins = secs / 60;
-        let secs = secs % 60;
-
-        write!(
-            &mut self.text,
-            "{} {} {}:{}",
-            track.album, track.artist, mins, secs
-        )
-        .unwrap();
-    }
-}
-
-pub static RADIO_DISPLAY: Mutex<EspRawMutex, RefCell<DisplayText>> =
-    Mutex::new(RefCell::new(DisplayText::new()));
-
 pub async fn process(
+    service: ServiceLifecycle<'_, impl RawMutex>,
     can: impl Peripheral<P = CAN>,
     tx: impl Peripheral<P = impl OutputPin>,
     rx: impl Peripheral<P = impl InputPin>,
-    start: Sender<'_, impl RawMutex, bool>,
-    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    audio: Receiver<'_, impl RawMutex, AudioState>,
+    _audio: Receiver<'_, impl RawMutex, AudioState>,
     phone: Receiver<'_, impl RawMutex, AudioState>,
     cockpit_display: &Signal<impl RawMutex, ()>,
     cockpit_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
     radio_display: &Signal<impl RawMutex, ()>,
     radio_display_state: &Mutex<impl RawMutex, RefCell<DisplayText>>,
+    radio: Receiver<'_, impl RawMutex, RadioState>,
     radio_out: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
-) -> Result<(), EspError> {
-    info!("Starting service CAN");
+    start: Sender<'_, impl RawMutex, bool>,
+) -> Result<(), Error> {
+    service.starting();
 
     let mut driver = create(can, tx, rx)?;
 
-    let send_radio_switch = &Signal::new();
-    let send_radio_display = &Signal::new();
-    let send_cockpit_display = &Signal::new();
-    let send_proxi = &Signal::new();
-    let send_status = &Signal::new();
+    let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
+    let send_radio_display = &Signal::<NoopRawMutex, _>::new();
+    let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
+    let send_proxi = &Signal::<NoopRawMutex, _>::new();
+    let send_status = &Signal::<NoopRawMutex, _>::new();
 
     driver.start()?;
 
-    info!("Service CAN started");
+    service.started();
 
     let res = SelectSpawn::run(core::future::pending())
-        .chain(process_radio_out(audio, phone, send_radio_switch))
+        .chain(process_radio_out(phone, radio, send_radio_switch))
         .chain(process_display(
             radio_display,
             radio_display_state,
@@ -700,8 +641,8 @@ pub async fn process(
         ))
         .chain(process_recv(
             &driver,
+            &service,
             start,
-            started_services,
             send_status,
             send_proxi,
             radio_out,
@@ -711,7 +652,7 @@ pub async fn process(
 
     driver.stop()?;
 
-    info!("Service CAN stopped");
+    service.stopped();
 
     res
 }
@@ -720,51 +661,28 @@ fn create<'d>(
     can: impl Peripheral<P = CAN> + 'd,
     tx: impl Peripheral<P = impl OutputPin> + 'd,
     rx: impl Peripheral<P = impl InputPin> + 'd,
-) -> Result<OwnedAsyncCanDriver<'d>, EspError> {
-    AsyncCanDriver::new(can, tx, rx, &CanConfig::new())
+) -> Result<OwnedAsyncCanDriver<'d>, Error> {
+    Ok(AsyncCanDriver::new(can, tx, rx, &CanConfig::new())?)
 }
 
 async fn process_radio_out(
-    audio: Receiver<'_, impl RawMutex, AudioState>,
     phone: Receiver<'_, impl RawMutex, AudioState>,
-    radio_switch_out: &Signal<NoopRawMutex, Frame>,
-) -> Result<(), EspError> {
-    let mut saudio = AudioState::Uninitialized;
-    let mut sphone = AudioState::Uninitialized;
-
-    let switch_state = |audio: &AudioState, phone: &AudioState| {
-        let topic = if phone.is_active() {
-            Topic::Bt(Bt::Phone)
-        } else if audio.is_active() {
-            Topic::Bt(Bt::Media)
-        } else {
-            Topic::Bt(Bt::Mute)
-        };
-
-        radio_switch_out.signal(as_frame(topic));
-    };
+    radio: Receiver<'_, impl RawMutex, RadioState>,
+    radio_switch_out: &Signal<impl RawMutex, Frame>,
+) -> Result<(), Error> {
+    let mut sradio = RadioState::Unknown;
 
     loop {
-        let ret = select(audio.recv(), phone.recv()).await;
+        let ret = select(radio.recv(), phone.recv()).await;
 
         match ret {
-            Either::First(new) => {
-                let switch = saudio.is_active() != new.is_active();
-
-                saudio = new;
-
-                if switch {
-                    switch_state(&saudio, &sphone);
+            Either::First(new) => sradio = new,
+            Either::Second(phone) => {
+                if phone.is_active() && !sradio.is_bt_active() {
+                    radio_switch_out.signal(as_frame(Topic::Bt(Bt::Phone)));
                 }
-            }
-            Either::Second(new) => {
-                let switch = sphone.is_active() != sphone.is_active();
 
-                sphone = new;
-
-                if switch {
-                    switch_state(&saudio, &sphone);
-                }
+                // TODO: Switch back on phone disconnect
             }
         }
     }
@@ -774,8 +692,8 @@ async fn process_display(
     new_text: &Signal<impl RawMutex, ()>,
     text: &Mutex<impl RawMutex, RefCell<DisplayText>>,
     for_radio: bool,
-    display_out: &Signal<NoopRawMutex, Frame>,
-) -> Result<(), EspError> {
+    display_out: &Signal<impl RawMutex, Frame>,
+) -> Result<(), Error> {
     let mut version = None;
     let mut offset = 0;
     let mut processing = false;
@@ -822,8 +740,8 @@ async fn process_display(
 
 async fn process_send<'d, const N: usize>(
     driver: &OwnedAsyncCanDriver<'d>,
-    frames: &[&Signal<NoopRawMutex, Frame>; N],
-) -> Result<(), EspError> {
+    frames: &[&Signal<impl RawMutex, Frame>; N],
+) -> Result<(), Error> {
     loop {
         let mut array = heapless::Vec::<_, N>::from_iter(frames.iter().map(|signal| signal.wait()));
 
@@ -835,13 +753,13 @@ async fn process_send<'d, const N: usize>(
 
 async fn process_recv<'d>(
     driver: &OwnedAsyncCanDriver<'d>,
+    service: &ServiceLifecycle<'_, impl RawMutex>,
     start: Sender<'_, impl RawMutex, bool>,
-    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    status_out: &Signal<NoopRawMutex, Frame>,
-    proxi_out: &Signal<NoopRawMutex, Frame>,
+    status_out: &Signal<impl RawMutex, Frame>,
+    proxi_out: &Signal<impl RawMutex, Frame>,
     radio: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
-) -> Result<(), EspError> {
+) -> Result<(), Error> {
     let mut shutdown_request = false;
     let mut pending_proxi_request = false;
     let mut pending_proxi_value = None;
@@ -853,8 +771,8 @@ async fn process_recv<'d>(
         match message.topic {
             Topic::BodyComputer(payload) => process_recv_body_computer(
                 payload,
+                service,
                 &start,
-                started_services,
                 &mut shutdown_request,
                 status_out,
             ),
@@ -885,7 +803,7 @@ fn process_recv_proxi(
     payload: Proxi<'_>,
     pending_proxi_request: &mut bool,
     proxi_value: &mut Option<[u8; 8]>,
-    proxi_out: &Signal<NoopRawMutex, Frame>,
+    proxi_out: &Signal<impl RawMutex, Frame>,
 ) {
     match payload {
         Proxi::Request => {
@@ -914,10 +832,10 @@ fn process_recv_proxi(
 
 fn process_recv_body_computer(
     payload: BodyComputer<'_>,
+    service: &ServiceLifecycle<'_, impl RawMutex>,
     start: &Sender<'_, impl RawMutex, bool>,
-    started_services: &Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
     shutdown_request: &mut bool,
-    status_out: &Signal<NoopRawMutex, Frame>,
+    status_out: &Signal<impl RawMutex, Frame>,
 ) {
     match payload {
         BodyComputer::WakeupRequest => {
@@ -929,12 +847,12 @@ fn process_recv_body_computer(
             start.send(false);
         }
         BodyComputer::StatusRequest => {
-            let started = get_started_services(started_services);
+            let started = service.get_all_started();
             let shutdown = *shutdown_request;
 
-            let report_state = if !shutdown && started | Service::Can == EnumSet::ALL {
+            let report_state = if !shutdown && (started | service.service()) == EnumSet::ALL {
                 BodyComputer::Active
-            } else if shutdown && started & Service::Can == EnumSet::EMPTY {
+            } else if shutdown && (started & !service.service() == EnumSet::EMPTY) {
                 BodyComputer::AboutToSleep
             } else {
                 BodyComputer::PoweringOn
