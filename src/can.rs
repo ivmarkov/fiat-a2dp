@@ -17,13 +17,16 @@ use esp_idf_svc::hal::{
     peripheral::Peripheral,
 };
 
+use crate::{error::Error, service::ServiceLifecycle};
 use crate::{
-    displays::DisplayText,
     select_spawn::SelectSpawn,
     signal::{Receiver, Sender, SharedStateReceiver},
-    state::{AudioState, BtCommand, BusSubscription, RadioState},
+    state::{
+        bt::{AudioState, BtCommand},
+        can::{DisplayText, RadioState},
+        BusSubscription,
+    },
 };
-use crate::{error::Error, service::ServiceLifecycle};
 
 use self::message::{
     BodyComputer, Bt, Display, Message, Proxi, Publisher, RadioSource, SteeringWheel,
@@ -52,7 +55,7 @@ pub mod message {
     const TOPIC_RADIO_STATION: u16 = 0xa19;
     const TOPIC_RADIO_SOURCE: u16 = 0xa11;
 
-    const CHAR_MAP: &str = "0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZ%% %ij%%%%%_%?!+-:/#*;";
+    const CHAR_MAP: &str = "0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZ%% %ij%%%%%%_%%?@!+-:/#*%;";
 
     pub type FramePayload = heapless::Vec<u8, 8>;
     pub type DisplayString = heapless::String<12>;
@@ -347,6 +350,7 @@ pub mod message {
     pub enum Display<'a> {
         Text {
             for_radio: bool,
+            menu: bool,
             text: DisplayString,
             chunk: usize,
             total_chunks: usize,
@@ -362,6 +366,7 @@ pub mod message {
                     chunk: (value[0] & 0x0f) as _,
                     total_chunks: ((value[0] >> 4) + 1) as _,
                     for_radio: value[1] >> 4 == 2,
+                    menu: value[1] & 0x0f == 6,
                 },
                 other => Self::Unknown(other),
             }
@@ -373,13 +378,16 @@ pub mod message {
             match value {
                 Display::Text {
                     for_radio,
+                    menu,
                     chunk,
                     total_chunks,
                     text,
                 } => {
                     let mut payload = encode_display_text(&text);
                     payload[0] = (((total_chunks - 1) << 4) | chunk) as u8;
-                    payload[1] = (((if for_radio { 2 } else { 1 }) << 4) | 0x0a) as u8;
+                    payload[1] = (((if for_radio { 2 } else { 1 }) << 4)
+                        | (if !for_radio && menu { 0x06 } else { 0x0a }))
+                        as u8;
 
                     payload
                 }
@@ -715,6 +723,7 @@ async fn process_display(
             }
 
             if !display_out.signaled() && processing {
+                let menu = text.menu && !for_radio;
                 let text = &text.text;
 
                 let chunk_payload = &text[offset..min(offset + 8, text.len())];
@@ -727,6 +736,7 @@ async fn process_display(
 
                 let topic = Topic::Display(Display::Text {
                     for_radio,
+                    menu,
                     text: chunk_payload.into(),
                     chunk,
                     total_chunks,

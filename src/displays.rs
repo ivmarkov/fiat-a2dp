@@ -1,5 +1,3 @@
-use core::fmt::Write;
-
 use embassy_futures::select::{select4, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
@@ -7,58 +5,11 @@ use crate::{
     error::Error,
     signal::SharedStateSender,
     state::{
-        AudioTrackState, BusSubscription, PhoneCallInfo, PhoneCallState, RadioState, TrackInfo,
+        bt::{AudioTrackState, PhoneCallState},
+        can::{DisplayText, RadioState},
+        BusSubscription,
     },
 };
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct DisplayText {
-    pub version: u32,
-    pub text: heapless::String<32>,
-}
-
-impl DisplayText {
-    pub const fn new() -> Self {
-        Self {
-            version: 0,
-            text: heapless::String::new(),
-        }
-    }
-
-    // pub fn reset(&mut self) {
-    //     self.version += 1;
-    //     self.text.clear();
-    // }
-
-    pub fn update_phone_info(&mut self, phone: &PhoneCallInfo) {
-        self.version += 1;
-        self.text.clear();
-
-        let secs = phone.duration.as_secs();
-
-        let mins = secs / 60;
-        let secs = secs % 60;
-
-        write!(&mut self.text, "{} {}:{}", phone.phone, mins, secs).unwrap();
-    }
-
-    pub fn update_track_info(&mut self, track: &TrackInfo) {
-        self.version += 1;
-        self.text.clear();
-
-        let secs = track.offset.as_secs();
-
-        let mins = secs / 60;
-        let secs = secs % 60;
-
-        write!(
-            &mut self.text,
-            "{} {} {}:{}",
-            track.album, track.artist, mins, secs
-        )
-        .unwrap();
-    }
-}
 
 // async fn process_cockpit(
 //     audio: Receiver<'_, impl RawMutex, AudioState>,

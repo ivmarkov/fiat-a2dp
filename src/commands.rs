@@ -5,7 +5,11 @@ use crate::{
     can::message::SteeringWheelButton,
     error::Error,
     signal::Sender,
-    state::{AudioState, AudioTrackState, BtCommand, BusSubscription, PhoneCallState, RadioState},
+    state::{
+        bt::{AudioState, AudioTrackState, BtCommand, PhoneCallState},
+        can::RadioState,
+        BusSubscription,
+    },
 };
 
 pub async fn process(

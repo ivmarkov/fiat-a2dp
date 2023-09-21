@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use core::cell::Cell;
 
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex};
 use enumset::{EnumSet, EnumSetType};
@@ -6,162 +6,228 @@ use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 use crate::{
     can::message::SteeringWheelButton,
-    displays::DisplayText,
     service::ServiceLifecycle,
     signal::{Receiver, SharedStateReceiver, SharedStateSpmcSignal, SpmcSignal},
 };
 
+use self::{
+    bt::{AudioState, BtCommand, BtState, PhoneCallInfo, TrackInfo},
+    can::{DisplayText, RadioState},
+};
+
 pub type DisplayString = heapless::String<32>;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum BtState {
-    Uninitialized,
-    Initialized,
-    Paired,
-    Connected,
-}
+pub mod bt {
+    use crate::can::message::DisplayString;
 
-impl BtState {
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected)
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum AudioState {
-    Uninitialized,
-    Initialized,
-    Connected,
-    Streaming,
-    Suspended,
-}
-
-impl AudioState {
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected) || self.is_active()
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum BtState {
+        Uninitialized,
+        Initialized,
+        Paired,
+        Connected,
     }
 
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Streaming)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct TrackInfo {
-    pub version: u32,
-    pub state: AudioTrackState,
-    pub artist: DisplayString,
-    pub album: DisplayString,
-    pub song: DisplayString,
-    pub offset: core::time::Duration,
-    pub duration: core::time::Duration,
-    pub paused: bool,
-}
-
-impl TrackInfo {
-    pub const fn new() -> Self {
-        Self {
-            version: 0,
-            state: AudioTrackState::Uninitialized,
-            artist: DisplayString::new(),
-            album: DisplayString::new(),
-            song: DisplayString::new(),
-            offset: core::time::Duration::from_secs(0),
-            duration: core::time::Duration::from_secs(0),
-            paused: false,
+    impl BtState {
+        pub fn is_connected(&self) -> bool {
+            matches!(self, Self::Connected)
         }
     }
 
-    pub fn reset(&mut self) {
-        self.artist.clear();
-        self.album.clear();
-        self.song.clear();
-        self.offset = core::time::Duration::from_secs(0);
-        self.duration = core::time::Duration::from_secs(0);
-        self.paused = false;
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum AudioTrackState {
-    Uninitialized,
-    Initialized,
-    Connected,
-    Playing,
-    Paused,
-}
-
-impl AudioTrackState {
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected) || self.is_active()
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum AudioState {
+        Uninitialized,
+        Initialized,
+        Connected,
+        Streaming,
+        Suspended,
     }
 
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Playing | Self::Paused)
-    }
-}
+    impl AudioState {
+        pub fn is_connected(&self) -> bool {
+            matches!(self, Self::Connected) || self.is_active()
+        }
 
-#[derive(Debug, Eq, PartialEq)]
-pub struct PhoneCallInfo {
-    pub version: u32,
-    pub state: PhoneCallState,
-    pub phone: DisplayString,
-    pub duration: core::time::Duration,
-}
-
-impl PhoneCallInfo {
-    pub const fn new() -> Self {
-        Self {
-            version: 0,
-            state: PhoneCallState::Idle,
-            phone: DisplayString::new(),
-            duration: core::time::Duration::from_secs(0),
+        pub fn is_active(&self) -> bool {
+            matches!(self, Self::Streaming)
         }
     }
 
-    pub fn reset(&mut self) {
-        self.phone.clear();
-        self.duration = core::time::Duration::from_secs(0);
+    #[derive(Debug, Eq, PartialEq)]
+    pub struct TrackInfo {
+        pub version: u32,
+        pub state: AudioTrackState,
+        pub artist: DisplayString,
+        pub album: DisplayString,
+        pub song: DisplayString,
+        pub offset: core::time::Duration,
+        pub duration: core::time::Duration,
+        pub paused: bool,
+    }
+
+    impl TrackInfo {
+        pub const fn new() -> Self {
+            Self {
+                version: 0,
+                state: AudioTrackState::Uninitialized,
+                artist: DisplayString::new(),
+                album: DisplayString::new(),
+                song: DisplayString::new(),
+                offset: core::time::Duration::from_secs(0),
+                duration: core::time::Duration::from_secs(0),
+                paused: false,
+            }
+        }
+
+        pub fn reset(&mut self) {
+            self.artist.clear();
+            self.album.clear();
+            self.song.clear();
+            self.offset = core::time::Duration::from_secs(0);
+            self.duration = core::time::Duration::from_secs(0);
+            self.paused = false;
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum AudioTrackState {
+        Uninitialized,
+        Initialized,
+        Connected,
+        Playing,
+        Paused,
+    }
+
+    impl AudioTrackState {
+        pub fn is_connected(&self) -> bool {
+            matches!(self, Self::Connected) || self.is_active()
+        }
+
+        pub fn is_active(&self) -> bool {
+            matches!(self, Self::Playing | Self::Paused)
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    pub struct PhoneCallInfo {
+        pub version: u32,
+        pub state: PhoneCallState,
+        pub phone: DisplayString,
+        pub duration: core::time::Duration,
+    }
+
+    impl PhoneCallInfo {
+        pub const fn new() -> Self {
+            Self {
+                version: 0,
+                state: PhoneCallState::Idle,
+                phone: DisplayString::new(),
+                duration: core::time::Duration::from_secs(0),
+            }
+        }
+
+        pub fn reset(&mut self) {
+            self.phone.clear();
+            self.duration = core::time::Duration::from_secs(0);
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum PhoneCallState {
+        Idle,
+        Dialing,
+        DialingAlerting,
+        Ringing,
+        CallActive,
+    }
+
+    impl PhoneCallState {
+        pub fn is_active(&self) -> bool {
+            !matches!(self, Self::Idle)
+        }
+    }
+
+    #[derive(Copy, Clone, Eq, PartialEq, Debug)]
+    pub enum BtCommand {
+        Answer,
+        Reject,
+        Hangup,
+        Pause,
+        Resume,
+        NextTrack,
+        PreviousTrack,
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum PhoneCallState {
-    Idle,
-    Dialing,
-    DialingAlerting,
-    Ringing,
-    CallActive,
-}
+pub mod can {
+    use core::fmt::Write;
 
-impl PhoneCallState {
-    pub fn is_active(&self) -> bool {
-        !matches!(self, Self::Idle)
+    use super::bt::{PhoneCallInfo, TrackInfo};
+
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    pub enum RadioState {
+        Unknown,
+        Fm,
+        BtActive,
+        BtMuted,
     }
-}
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum BtCommand {
-    Answer,
-    Reject,
-    Hangup,
-    Pause,
-    Resume,
-    NextTrack,
-    PreviousTrack,
-}
+    impl RadioState {
+        pub fn is_bt_active(&self) -> bool {
+            matches!(self, Self::BtActive)
+        }
+    }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum RadioState {
-    Unknown,
-    Fm,
-    BtActive,
-    BtMuted,
-}
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    pub struct DisplayText {
+        pub version: u32,
+        pub menu: bool,
+        pub text: heapless::String<32>,
+    }
 
-impl RadioState {
-    pub fn is_bt_active(&self) -> bool {
-        matches!(self, Self::BtActive)
+    impl DisplayText {
+        pub const fn new() -> Self {
+            Self {
+                version: 0,
+                menu: false,
+                text: heapless::String::new(),
+            }
+        }
+
+        pub fn reset(&mut self) {
+            self.version += 1;
+            self.menu = false;
+            self.text.clear();
+        }
+
+        pub fn update_phone_info(&mut self, phone: &PhoneCallInfo) {
+            self.version += 1;
+            self.text.clear();
+
+            let secs = phone.duration.as_secs();
+
+            let mins = secs / 60;
+            let secs = secs % 60;
+
+            write!(&mut self.text, "{} {:02}:{:02}", phone.phone, mins, secs).unwrap();
+        }
+
+        pub fn update_track_info(&mut self, track: &TrackInfo) {
+            self.version += 1;
+            self.text.clear();
+
+            let secs = track.offset.as_secs();
+
+            let mins = secs / 60;
+            let secs = secs % 60;
+
+            write!(
+                &mut self.text,
+                "{};{};{:02}:{:02}",
+                track.album, track.artist, mins, secs
+            )
+            .unwrap();
+        }
     }
 }
 

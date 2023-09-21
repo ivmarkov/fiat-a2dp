@@ -28,8 +28,10 @@ use crate::error::Error;
 use crate::select_spawn::SelectSpawn;
 use crate::signal::{Receiver, Sender, SharedStateSender};
 use crate::state::{
-    AudioState, AudioTrackState, BtCommand, BtState, BusSubscription, PhoneCallInfo,
-    PhoneCallState, TrackInfo,
+    bt::{
+        AudioState, AudioTrackState, BtCommand, BtState, PhoneCallInfo, PhoneCallState, TrackInfo,
+    },
+    BusSubscription,
 };
 
 pub async fn process(
