@@ -821,9 +821,9 @@ async fn process_debounce_buttons(
             Either::First(new) => {
                 for button in EnumSet::ALL {
                     if latest_state.contains(button) != new.contains(button) {
-                        let debounced = &mut debouncing[button as usize];
-                        if !debounced.is_some() {
-                            *debounced = Some(Duration::from_millis(100));
+                        let debouncing = &mut debouncing[button as usize];
+                        if !debouncing.is_some() {
+                            *debouncing = Some(Duration::from_millis(100));
                         }
                     }
                 }
@@ -834,9 +834,9 @@ async fn process_debounce_buttons(
                 let mut send_buttons = false;
 
                 for button in EnumSet::<SteeringWheelButton>::ALL {
-                    let debounced = &mut debouncing[button as usize];
+                    let debouncing = &mut debouncing[button as usize];
 
-                    if let Some(duration) = *debounced {
+                    if let Some(duration) = *debouncing {
                         if duration < TICK {
                             if latest_state.contains(button) {
                                 debounced_state |= button;
@@ -845,9 +845,9 @@ async fn process_debounce_buttons(
                             }
 
                             send_buttons = true;
-                            *debounced = None;
+                            *debouncing = None;
                         } else {
-                            *debounced = Some(duration - TICK);
+                            *debouncing = Some(duration - TICK);
                         }
                     }
                 }
