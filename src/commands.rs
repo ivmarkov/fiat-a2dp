@@ -1,5 +1,6 @@
 use embassy_futures::select::{select4, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use enumset::EnumSet;
 
 use crate::{
     can::message::SteeringWheelButton,
@@ -26,6 +27,8 @@ pub async fn process(
         let mut scall = PhoneCallState::Idle;
         let mut sradio = RadioState::Unknown;
 
+        let mut sbuttons = EnumSet::EMPTY;
+
         loop {
             match select4(
                 bus.service.wait_stop(),
@@ -51,10 +54,14 @@ pub async fn process(
                 }
                 Either4::Third(new) => sradio = new,
                 Either4::Fourth(buttons) => {
+                    let just_pressed = sbuttons.intersection(buttons);
+
+                    sbuttons = buttons;
+
                     if matches!(scall, PhoneCallState::Ringing) {
-                        if buttons.contains(SteeringWheelButton::Menu) {
+                        if just_pressed.contains(SteeringWheelButton::Menu) {
                             button_commands.send(BtCommand::Answer);
-                        } else if buttons.contains(SteeringWheelButton::Windows) {
+                        } else if just_pressed.contains(SteeringWheelButton::Windows) {
                             button_commands.send(BtCommand::Reject);
                         }
                     } else if matches!(
@@ -63,14 +70,14 @@ pub async fn process(
                             | PhoneCallState::Dialing
                             | PhoneCallState::DialingAlerting
                     ) {
-                        if buttons.contains(SteeringWheelButton::Menu)
-                            | buttons.contains(SteeringWheelButton::Windows)
+                        if just_pressed.contains(SteeringWheelButton::Menu)
+                            | just_pressed.contains(SteeringWheelButton::Windows)
                         {
                             button_commands.send(BtCommand::Hangup);
                         }
                     } else if sradio.is_bt_active() && !sphone.is_active() {
                         if saudio.is_connected() {
-                            if buttons.contains(SteeringWheelButton::Mute) {
+                            if just_pressed.contains(SteeringWheelButton::Mute) {
                                 if matches!(saudio, AudioState::Streaming) {
                                     button_commands.send(BtCommand::Pause);
                                 } else if matches!(
@@ -79,11 +86,11 @@ pub async fn process(
                                 ) {
                                     button_commands.send(BtCommand::Resume);
                                 }
-                            } else if buttons.contains(SteeringWheelButton::Up)
+                            } else if just_pressed.contains(SteeringWheelButton::Up)
                                 && strack.is_connected()
                             {
                                 button_commands.send(BtCommand::PreviousTrack);
-                            } else if buttons.contains(SteeringWheelButton::Down)
+                            } else if just_pressed.contains(SteeringWheelButton::Down)
                                 && strack.is_connected()
                             {
                                 button_commands.send(BtCommand::NextTrack);

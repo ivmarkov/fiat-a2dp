@@ -18,7 +18,7 @@ use self::{
 pub type DisplayString = heapless::String<32>;
 
 pub mod bt {
-    use crate::can::message::DisplayString;
+    use super::DisplayString;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub enum BtState {
@@ -162,7 +162,10 @@ pub mod bt {
 pub mod can {
     use core::fmt::Write;
 
-    use super::bt::{PhoneCallInfo, TrackInfo};
+    use super::{
+        bt::{PhoneCallInfo, TrackInfo},
+        DisplayString,
+    };
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub enum RadioState {
@@ -182,7 +185,7 @@ pub mod can {
     pub struct DisplayText {
         pub version: u32,
         pub menu: bool,
-        pub text: heapless::String<32>,
+        pub text: DisplayString,
     }
 
     impl DisplayText {

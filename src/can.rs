@@ -1,6 +1,6 @@
 use core::cmp::min;
 
-use embassy_futures::select::{select, select3, select_slice, Either3};
+use embassy_futures::select::{select, select3, select_slice, Either, Either3};
 
 use embassy_sync::{
     blocking_mutex::raw::{NoopRawMutex, RawMutex},
@@ -604,6 +604,8 @@ pub async fn process(
 
     let mut driver = create(can, tx, rx)?;
 
+    let raw_buttons = &Signal::<NoopRawMutex, _>::new();
+
     let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
     let send_radio_display = &Signal::<NoopRawMutex, _>::new();
     let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
@@ -615,7 +617,7 @@ pub async fn process(
     bus.service.started();
 
     let res = SelectSpawn::run(core::future::pending())
-        .chain(process_radio_out(
+        .chain(process_radio_mux(
             bus.audio,
             bus.phone,
             bus.radio,
@@ -638,6 +640,7 @@ pub async fn process(
                 send_status,
             ],
         ))
+        .chain(process_debounce_buttons(raw_buttons, buttons))
         .chain(process_recv(
             &driver,
             &bus.service,
@@ -645,7 +648,7 @@ pub async fn process(
             send_status,
             send_proxi,
             radio,
-            buttons,
+            raw_buttons,
         ))
         .await;
 
@@ -664,7 +667,7 @@ fn create<'d>(
     Ok(AsyncCanDriver::new(can, tx, rx, &CanConfig::new())?)
 }
 
-async fn process_radio_out(
+async fn process_radio_mux(
     audio: Receiver<'_, impl RawMutex, AudioState>,
     phone: Receiver<'_, impl RawMutex, AudioState>,
     radio: Receiver<'_, impl RawMutex, RadioState>,
@@ -772,7 +775,7 @@ async fn process_recv<'d>(
     status_out: &Signal<impl RawMutex, Frame>,
     proxi_out: &Signal<impl RawMutex, Frame>,
     radio: Sender<'_, impl RawMutex, RadioState>,
-    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    raw_buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), Error> {
     let mut shutdown_request = false;
     let mut pending_proxi_request = false;
@@ -796,19 +799,73 @@ async fn process_recv<'d>(
                 &mut pending_proxi_value,
                 proxi_out,
             ),
-            Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, &buttons),
+            Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, raw_buttons),
             Topic::RadioSource(payload) => process_recv_radio_source(payload, &radio),
             _ => (),
         }
     }
 }
 
+async fn process_debounce_buttons(
+    raw_buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
+    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+) -> Result<(), Error> {
+    const TICK: Duration = Duration::from_millis(10);
+
+    let mut debouncing = [None; 16];
+    let mut debounced_state = EnumSet::EMPTY;
+    let mut latest_state = EnumSet::EMPTY;
+
+    loop {
+        match select(raw_buttons.wait(), Timer::after(TICK)).await {
+            Either::First(new) => {
+                for button in EnumSet::ALL {
+                    if latest_state.contains(button) != new.contains(button) {
+                        let debounced = &mut debouncing[button as usize];
+                        if !debounced.is_some() {
+                            *debounced = Some(Duration::from_millis(100));
+                        }
+                    }
+                }
+
+                latest_state = new;
+            }
+            Either::Second(_) => {
+                let mut send_buttons = false;
+
+                for button in EnumSet::<SteeringWheelButton>::ALL {
+                    let debounced = &mut debouncing[button as usize];
+
+                    if let Some(duration) = *debounced {
+                        if duration < TICK {
+                            if latest_state.contains(button) {
+                                debounced_state |= button;
+                            } else {
+                                debounced_state &= button;
+                            }
+
+                            send_buttons = true;
+                            *debounced = None;
+                        } else {
+                            *debounced = Some(duration - TICK);
+                        }
+                    }
+                }
+
+                if send_buttons {
+                    buttons.send(debounced_state);
+                }
+            }
+        }
+    }
+}
+
 fn process_recv_steering_wheel(
     payload: SteeringWheel<'_>,
-    buttons: &Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) {
     match payload {
-        SteeringWheel::Buttons(state) => buttons.send(state),
+        SteeringWheel::Buttons(state) => buttons.signal(state),
         _ => (),
     }
 }
