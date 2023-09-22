@@ -37,24 +37,11 @@ pub async fn process(
                 timer_service.clone(),
             )?;
 
-            driver.set_configuration(&Configuration::None)?;
-
-            driver.start().await?;
-
-            driver.set_configuration(&Configuration::Client(ClientConfiguration {
-                auth_method: AuthMethod::None,
-                ..Default::default()
-            }))?;
-
-            driver.start().await?;
-
             bus.service.started();
 
             let res = SelectSpawn::run(bus.service.wait_disabled())
                 .chain(process_update(&mut driver, &bus.update))
                 .await;
-
-            driver.stop().await?;
 
             bus.service.stopped();
 
@@ -79,6 +66,13 @@ async fn process_update(
 }
 
 async fn connect(driver: &mut AsyncWifi<EspWifi<'_>>) -> Result<(), Error> {
+    driver.set_configuration(&Configuration::Client(ClientConfiguration {
+        auth_method: AuthMethod::None,
+        ..Default::default()
+    }))?;
+
+    driver.start().await?;
+
     let (access_points, _) = driver.scan_n::<20>().await?;
 
     let access_point = access_points

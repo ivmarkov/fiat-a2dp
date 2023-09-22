@@ -12,13 +12,13 @@ mod can;
 mod commands;
 mod displays;
 mod error;
-mod flash_mode;
 mod ringbuf;
 mod run;
 mod select_spawn;
 mod service;
 mod signal;
 mod updates;
+mod usb_cutoff;
 
 fn main() -> Result<(), Error> {
     esp_idf_svc::sys::link_patches();

@@ -13,7 +13,7 @@ use esp_idf_svc::timer::EspTimerService;
 use crate::audio::create_audio_buffers;
 use crate::bus::{Bus, Service};
 use crate::error::Error;
-use crate::flash_mode::FlashMode;
+use crate::usb_cutoff::UsbCutoff;
 use crate::{audio, bt, can, commands, displays, updates};
 
 pub fn run(peripherals: Peripherals) -> Result<(), Error> {
@@ -32,8 +32,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
     let tx = peripherals.pins.gpio22;
     let rx = peripherals.pins.gpio23;
 
-    let flash_mode_flash = peripherals.pins.gpio12;
-    let flash_mode_reset = peripherals.pins.gpio13;
+    let usb_cutoff = peripherals.pins.gpio13;
 
     let nvs = EspDefaultNvsPartition::take()?;
 
@@ -120,7 +119,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
         .spawn_local_collect(
             commands::process(
                 bus.subscription(Service::Can),
-                FlashMode::new(flash_mode_flash, flash_mode_reset)?,
+                UsbCutoff::new(usb_cutoff)?,
                 bus.button_commands.sender(),
             ),
             &mut tasks,

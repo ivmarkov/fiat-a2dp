@@ -13,8 +13,8 @@ use crate::{
     },
     can::message::SteeringWheelButton,
     error::Error,
-    flash_mode::FlashMode,
     signal::{Receiver, Sender, StatefulReceiver},
+    usb_cutoff::UsbCutoff,
 };
 
 struct Status {
@@ -39,10 +39,11 @@ impl Status {
 
 pub async fn process(
     bus: BusSubscription<'_>,
-    mut flash_mode: FlashMode<'_>,
+    mut usb_cutoff: UsbCutoff<'_>,
     button_commands: Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
-    let flash_mode_period = Cell::new(true);
+    let usb_cutoff_disable_period = Cell::new(true);
+    let usb_cutoff_disable = Cell::new(false);
 
     loop {
         bus.service.starting();
@@ -53,12 +54,16 @@ pub async fn process(
         loop {
             match select4(
                 bus.service.wait_disabled(),
-                process_flash_mode_period(&flash_mode_period),
+                process_usb_cutoff(
+                    &mut usb_cutoff,
+                    &usb_cutoff_disable_period,
+                    &usb_cutoff_disable,
+                ),
                 process_buttons(
                     &bus.buttons,
                     &status,
-                    &mut flash_mode,
-                    &flash_mode_period,
+                    &usb_cutoff_disable_period,
+                    &usb_cutoff_disable,
                     &button_commands,
                 ),
                 process_status(
@@ -81,10 +86,19 @@ pub async fn process(
     }
 }
 
-async fn process_flash_mode_period(flash_mode_period: &Cell<bool>) -> Result<(), Error> {
-    Timer::after(Duration::from_secs(3)).await;
+async fn process_usb_cutoff(
+    usb_cutoff: &mut UsbCutoff<'_>,
+    usb_cutoff_disable_period: &Cell<bool>,
+    usb_cutoff_disable: &Cell<bool>,
+) -> Result<(), Error> {
+    if usb_cutoff_disable_period.get() {
+        Timer::after(Duration::from_secs(3)).await;
+        usb_cutoff_disable_period.set(false);
+    }
 
-    flash_mode_period.set(false);
+    if !usb_cutoff_disable.get() {
+        usb_cutoff.cutoff()?;
+    }
 
     core::future::pending().await
 }
@@ -92,8 +106,8 @@ async fn process_flash_mode_period(flash_mode_period: &Cell<bool>) -> Result<(),
 async fn process_buttons(
     buttons: &Receiver<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
     status: &RefCell<Status>,
-    flash_mode: &mut FlashMode<'_>,
-    flash_mode_period: &Cell<bool>,
+    usb_cutoff_disable_period: &Cell<bool>,
+    usb_cutoff_disable: &Cell<bool>,
     button_commands: &Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
     let mut sbuttons = EnumSet::EMPTY;
@@ -112,8 +126,8 @@ async fn process_buttons(
             conf = false;
         } else {
             if just_pressed.contains(SteeringWheelButton::Windows) {
-                if flash_mode_period.get() && sbuttons.contains(SteeringWheelButton::Mute) {
-                    flash_mode.enter().await?;
+                if usb_cutoff_disable_period.get() && sbuttons.contains(SteeringWheelButton::Mute) {
+                    usb_cutoff_disable.set(true);
                 } else {
                     conf = !conf;
                 }
