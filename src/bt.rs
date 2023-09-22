@@ -24,15 +24,15 @@ use log::*;
 
 use crate::audio::AUDIO_BUFFERS;
 
-use crate::error::Error;
-use crate::select_spawn::SelectSpawn;
-use crate::signal::{Receiver, Sender, SharedStateSender};
-use crate::state::{
+use crate::bus::{
     bt::{
         AudioState, AudioTrackState, BtCommand, BtState, PhoneCallInfo, PhoneCallState, TrackInfo,
     },
     BusSubscription,
 };
+use crate::error::Error;
+use crate::select_spawn::SelectSpawn;
+use crate::signal::{Receiver, Sender, StatefulSender};
 
 pub async fn process(
     mut modem: impl Peripheral<P = impl BluetoothModemPeripheral>,
@@ -40,11 +40,13 @@ pub async fn process(
     bus: BusSubscription<'_>,
     bt: Sender<'_, impl RawMutex + Sync, BtState>,
     audio: Sender<'_, impl RawMutex + Sync, AudioState>,
-    audio_track: SharedStateSender<'_, impl RawMutex + Sync, TrackInfo>,
+    audio_track: StatefulSender<'_, impl RawMutex + Sync, TrackInfo>,
     phone: Sender<'_, impl RawMutex + Sync, AudioState>,
-    phone_call: SharedStateSender<'_, impl RawMutex + Sync, PhoneCallInfo>,
+    phone_call: StatefulSender<'_, impl RawMutex + Sync, PhoneCallInfo>,
 ) -> Result<(), Error> {
     loop {
+        bus.service.wait_enabled().await?;
+
         {
             bus.service.starting();
 
@@ -109,13 +111,11 @@ pub async fn process(
 
             bus.service.started();
 
-            SelectSpawn::run(bus.service.wait_stop())
+            SelectSpawn::run(bus.service.wait_disabled())
                 .chain(process_commands(&bus.radio_commands, &a2dp, &avrcc, &hfpc))
                 .chain(process_commands(&bus.button_commands, &a2dp, &avrcc, &hfpc))
                 .await?;
         }
-
-        bus.service.wait_start().await?;
     }
 }
 
@@ -196,7 +196,7 @@ fn handle_a2dp<'d, M>(
 
 fn handle_avrcc<'d, M>(
     avrcc: &EspAvrcc<'d, M, &BtDriver<'d, M>>,
-    audio_track: &SharedStateSender<'_, impl RawMutex, TrackInfo>,
+    audio_track: &StatefulSender<'_, impl RawMutex, TrackInfo>,
     event: AvrccEvent<'_>,
 ) where
     M: BtClassicEnabled,
@@ -291,7 +291,7 @@ fn handle_avrcc<'d, M>(
 fn handle_hfpc<'d, M>(
     hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
     phone: &Sender<'_, impl RawMutex, AudioState>,
-    phone_call: &SharedStateSender<'_, impl RawMutex, PhoneCallInfo>,
+    phone_call: &StatefulSender<'_, impl RawMutex, PhoneCallInfo>,
     event: HfpcEvent<'_>,
 ) -> usize
 where

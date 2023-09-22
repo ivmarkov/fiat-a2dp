@@ -23,10 +23,10 @@ use esp_idf_svc::hal::{
 
 use log::info;
 
+use crate::bus::BusSubscription;
 use crate::error::Error;
 use crate::ringbuf::RingBuf;
 use crate::select_spawn::SelectSpawn;
-use crate::state::BusSubscription;
 
 pub struct AudioBuffers<const I: usize, const O: usize> {
     ringbuf_incoming: RingBuf<{ I }>,
@@ -131,11 +131,13 @@ static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
 pub async fn process_audio_mux(bus: BusSubscription<'_>) -> Result<(), Error> {
     loop {
+        bus.service.wait_enabled().await?;
+
         bus.service.starting();
         bus.service.started();
 
         loop {
-            let state = select(bus.service.wait_stop(), bus.phone.recv()).await;
+            let state = select(bus.service.wait_disabled(), bus.phone.recv()).await;
 
             match state {
                 Either::First(other) => break other,
@@ -146,8 +148,6 @@ pub async fn process_audio_mux(bus: BusSubscription<'_>) -> Result<(), Error> {
                 }
             }
         }?;
-
-        bus.service.wait_start().await?;
     }
 }
 
@@ -160,6 +160,8 @@ pub async fn process_microphone(
     notify_outgoing: impl Fn(),
 ) -> Result<(), Error> {
     loop {
+        bus.service.wait_enabled().await?;
+
         {
             bus.service.starting();
 
@@ -177,7 +179,7 @@ pub async fn process_microphone(
 
             bus.service.started();
 
-            let res = SelectSpawn::run(bus.service.wait_stop())
+            let res = SelectSpawn::run(bus.service.wait_disabled())
                 .chain(process_microphone_reading(
                     &mut driver,
                     buf,
@@ -189,8 +191,6 @@ pub async fn process_microphone(
 
             res?;
         }
-
-        bus.service.wait_start().await?;
     }
 }
 
@@ -257,6 +257,8 @@ pub async fn process_speakers(
     buf: &mut [u8],
 ) -> Result<(), Error> {
     loop {
+        bus.service.wait_enabled().await?;
+
         {
             bus.service.starting();
 
@@ -272,7 +274,7 @@ pub async fn process_speakers(
                 bus.service.started();
 
                 let res = select(
-                    bus.service.wait_stop(),
+                    bus.service.wait_disabled(),
                     process_speakers_writing(&mut driver, buf, &mut a2dp_conf),
                 )
                 .await;
@@ -285,8 +287,6 @@ pub async fn process_speakers(
                 }
             }?;
         }
-
-        bus.service.wait_start().await?;
     }
 }
 

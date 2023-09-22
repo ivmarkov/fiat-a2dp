@@ -7,8 +7,9 @@ use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
 
+use crate::bus::{Bus, Service};
 use crate::error::Error;
-use crate::state::{Service, State};
+use crate::flash_mode::FlashMode;
 use crate::{audio, bt, can, commands, displays};
 
 pub fn run(peripherals: Peripherals) -> Result<(), Error> {
@@ -27,6 +28,9 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
     let tx = peripherals.pins.gpio22;
     let rx = peripherals.pins.gpio23;
 
+    let flash_mode_flash = peripherals.pins.gpio12;
+    let flash_mode_reset = peripherals.pins.gpio13;
+
     let nvs = EspDefaultNvsPartition::take()?;
 
     let executor = EspExecutor::<16, _>::new();
@@ -38,29 +42,29 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
     let adc_buf = unsafe { adc_buf.assume_init_mut() };
     let i2s_buf = unsafe { i2s_buf.assume_init_mut() };
 
-    let state = State::new();
+    let bus = Bus::new();
 
     executor
         .spawn_local_collect(
             bt::process(
                 modem,
                 nvs,
-                state.subscription(Service::Bt),
-                state.bt.sender(),
-                state.audio.sender(),
-                state.audio_track.sender(),
-                state.phone.sender(),
-                state.phone_call.sender(),
+                bus.subscription(Service::Bt),
+                bus.bt.sender(),
+                bus.audio.sender(),
+                bus.audio_track.sender(),
+                bus.phone.sender(),
+                bus.phone_call.sender(),
             ),
             &mut tasks,
         )?
         .spawn_local_collect(
-            audio::process_audio_mux(state.subscription(Service::AudioMux)),
+            audio::process_audio_mux(bus.subscription(Service::AudioMux)),
             &mut tasks,
         )?
         .spawn_local_collect(
             audio::process_microphone(
-                state.subscription(Service::Microphone),
+                bus.subscription(Service::Microphone),
                 adc1,
                 adc_pin,
                 i2s0,
@@ -71,7 +75,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
         )?
         .spawn_local_collect(
             audio::process_speakers(
-                state.subscription(Service::Speakers),
+                bus.subscription(Service::Speakers),
                 i2s,
                 i2s_bclk,
                 i2s_dout,
@@ -82,28 +86,28 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
         )?
         .spawn_local_collect(
             can::process(
-                state.subscription(Service::Can),
+                bus.subscription(Service::Can),
                 can,
                 tx,
                 rx,
-                state.radio.sender(),
-                state.buttons.sender(),
-                state.radio_commands.sender(),
-                state.start.sender(),
+                bus.radio.sender(),
+                bus.buttons.sender(),
+                bus.radio_commands.sender(),
             ),
             &mut tasks,
         )?
         .spawn_local_collect(
             displays::process_radio(
-                state.subscription(Service::RadioDisplay),
-                state.radio_display.sender(),
+                bus.subscription(Service::RadioDisplay),
+                bus.radio_display.sender(),
             ),
             &mut tasks,
         )?
         .spawn_local_collect(
             commands::process(
-                state.subscription(Service::Can),
-                state.button_commands.sender(),
+                bus.subscription(Service::Can),
+                FlashMode::new(flash_mode_flash, flash_mode_reset)?,
+                bus.button_commands.sender(),
             ),
             &mut tasks,
         )?

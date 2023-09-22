@@ -2,13 +2,13 @@ use embassy_futures::select::{select4, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use crate::{
-    error::Error,
-    signal::SharedStateSender,
-    state::{
+    bus::{
         bt::{AudioTrackState, PhoneCallState},
         can::{DisplayText, RadioState},
         BusSubscription,
     },
+    error::Error,
+    signal::StatefulSender,
 };
 
 // async fn process_cockpit(
@@ -27,7 +27,7 @@ use crate::{
 
 pub async fn process_radio(
     bus: BusSubscription<'_>,
-    radio_display: SharedStateSender<'_, impl RawMutex, DisplayText>,
+    radio_display: StatefulSender<'_, impl RawMutex, DisplayText>,
 ) -> Result<(), Error> {
     loop {
         bus.service.starting();
@@ -39,7 +39,7 @@ pub async fn process_radio(
 
         loop {
             let ret = select4(
-                bus.service.wait_stop(),
+                bus.service.wait_disabled(),
                 bus.radio.recv(),
                 bus.phone_call.recv(),
                 bus.audio_track.recv(),
@@ -72,6 +72,6 @@ pub async fn process_radio(
             }
         }
 
-        bus.service.wait_start().await?;
+        bus.service.wait_enabled().await?;
     }
 }

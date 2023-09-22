@@ -5,15 +5,15 @@ use embassy_sync::{
     signal::Signal,
 };
 
-use crate::state::Service;
+use crate::bus::Service;
 
-const MAX_RECEIVERS: usize = 8;
+const MAX_RECEIVERS: usize = 9;
 
-pub struct SpmcSignal<M, T>([Signal<M, T>; MAX_RECEIVERS])
+pub struct BroadcastSignal<M, T>([Signal<M, T>; MAX_RECEIVERS])
 where
     M: RawMutex;
 
-impl<M, T> SpmcSignal<M, T>
+impl<M, T> BroadcastSignal<M, T>
 where
     M: RawMutex,
 {
@@ -64,39 +64,39 @@ where
     }
 }
 
-pub struct SharedStateSpmcSignal<M, S>
+pub struct StatefulBroadcastSignal<M, S>
 where
     M: RawMutex,
 {
     state: Mutex<M, RefCell<S>>,
-    signal: SpmcSignal<M, ()>,
+    signal: BroadcastSignal<M, ()>,
 }
 
-impl<M, S> SharedStateSpmcSignal<M, S>
+impl<M, S> StatefulBroadcastSignal<M, S>
 where
     M: RawMutex,
 {
     pub const fn new(state: S) -> Self {
         Self {
             state: Mutex::new(RefCell::new(state)),
-            signal: SpmcSignal::new(),
+            signal: BroadcastSignal::new(),
         }
     }
 
-    pub fn receiver(&self, service: Service) -> SharedStateReceiver<'_, M, S> {
-        SharedStateReceiver(self.signal.receiver(service), &self.state)
+    pub fn receiver(&self, service: Service) -> StatefulReceiver<'_, M, S> {
+        StatefulReceiver(self.signal.receiver(service), &self.state)
     }
 
-    pub fn sender(&self) -> SharedStateSender<'_, M, S> {
-        SharedStateSender(&self.signal.0, &self.state)
+    pub fn sender(&self) -> StatefulSender<'_, M, S> {
+        StatefulSender(&self.signal.0, &self.state)
     }
 }
 
-pub struct SharedStateReceiver<'a, M, S>(Receiver<'a, M, ()>, &'a Mutex<M, RefCell<S>>)
+pub struct StatefulReceiver<'a, M, S>(Receiver<'a, M, ()>, &'a Mutex<M, RefCell<S>>)
 where
     M: RawMutex;
 
-impl<'a, M, S> SharedStateReceiver<'a, M, S>
+impl<'a, M, S> StatefulReceiver<'a, M, S>
 where
     M: RawMutex,
 {
@@ -109,11 +109,11 @@ where
     }
 }
 
-pub struct SharedStateSender<'a, M, S>(&'a [Signal<M, ()>], &'a Mutex<M, RefCell<S>>)
+pub struct StatefulSender<'a, M, S>(&'a [Signal<M, ()>], &'a Mutex<M, RefCell<S>>)
 where
     M: RawMutex;
 
-impl<'a, M, S> SharedStateSender<'a, M, S>
+impl<'a, M, S> StatefulSender<'a, M, S>
 where
     M: RawMutex,
 {

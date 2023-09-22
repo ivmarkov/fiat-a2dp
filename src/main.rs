@@ -7,16 +7,17 @@ use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
 
 mod audio;
 mod bt;
+mod bus;
 mod can;
 mod commands;
 mod displays;
 mod error;
+mod flash_mode;
 mod ringbuf;
 mod run;
 mod select_spawn;
 mod service;
 mod signal;
-mod state;
 
 fn main() -> Result<(), Error> {
     esp_idf_svc::sys::link_patches();

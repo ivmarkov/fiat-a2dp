@@ -17,15 +17,18 @@ use esp_idf_svc::hal::{
     peripheral::Peripheral,
 };
 
-use crate::{error::Error, service::ServiceLifecycle};
 use crate::{
-    select_spawn::SelectSpawn,
-    signal::{Receiver, Sender, SharedStateReceiver},
-    state::{
+    bus::{
         bt::{AudioState, BtCommand},
         can::{DisplayText, RadioState},
         BusSubscription,
     },
+    select_spawn::SelectSpawn,
+    signal::{Receiver, Sender, StatefulReceiver},
+};
+use crate::{
+    error::Error,
+    service::{ServiceLifecycle, SystemState},
 };
 
 use self::message::{
@@ -592,71 +595,79 @@ pub mod message {
 
 pub async fn process(
     bus: BusSubscription<'_>,
-    can: impl Peripheral<P = CAN>,
-    tx: impl Peripheral<P = impl OutputPin>,
-    rx: impl Peripheral<P = impl InputPin>,
+    mut can: impl Peripheral<P = CAN>,
+    mut tx: impl Peripheral<P = impl OutputPin>,
+    mut rx: impl Peripheral<P = impl InputPin>,
     radio: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
     radio_commands: Sender<'_, impl RawMutex, BtCommand>,
-    start: Sender<'_, impl RawMutex, bool>,
 ) -> Result<(), Error> {
-    bus.service.starting();
+    loop {
+        bus.service.wait_enabled().await?;
 
-    let mut driver = create(can, tx, rx)?;
+        loop {
+            bus.service.starting();
 
-    let raw_buttons = &Signal::<NoopRawMutex, _>::new();
+            let mut driver = create(&mut can, &mut tx, &mut rx)?;
 
-    let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
-    let send_radio_display = &Signal::<NoopRawMutex, _>::new();
-    let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
-    let send_proxi = &Signal::<NoopRawMutex, _>::new();
-    let send_status = &Signal::<NoopRawMutex, _>::new();
+            let raw_buttons = &Signal::<NoopRawMutex, _>::new();
 
-    driver.start()?;
+            let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
+            let send_radio_display = &Signal::<NoopRawMutex, _>::new();
+            let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
+            let send_proxi = &Signal::<NoopRawMutex, _>::new();
+            let send_status = &Signal::<NoopRawMutex, _>::new();
 
-    bus.service.started();
+            driver.start()?;
 
-    let res = SelectSpawn::run(core::future::pending())
-        .chain(process_radio_mux(
-            bus.audio,
-            bus.phone,
-            bus.radio,
-            radio_commands,
-            send_radio_switch,
-        ))
-        .chain(process_display(bus.radio_display, true, send_radio_display))
-        .chain(process_display(
-            bus.cockpit_display,
-            false,
-            send_cockpit_display,
-        ))
-        .chain(process_send(
-            &driver,
-            &[
-                send_radio_switch,
-                send_radio_display,
-                send_cockpit_display,
-                send_proxi,
-                send_status,
-            ],
-        ))
-        .chain(process_debounce_buttons(raw_buttons, buttons))
-        .chain(process_recv(
-            &driver,
-            &bus.service,
-            start,
-            send_status,
-            send_proxi,
-            radio,
-            raw_buttons,
-        ))
-        .await;
+            bus.service.started();
 
-    driver.stop()?;
+            let res = SelectSpawn::run(bus.service.wait_disabled())
+                .chain(process_radio_mux(
+                    &bus.audio,
+                    &bus.phone,
+                    &bus.radio,
+                    &radio_commands,
+                    send_radio_switch,
+                ))
+                .chain(process_display(
+                    &bus.radio_display,
+                    true,
+                    send_radio_display,
+                ))
+                .chain(process_display(
+                    &bus.cockpit_display,
+                    false,
+                    send_cockpit_display,
+                ))
+                .chain(process_send(
+                    &driver,
+                    &[
+                        send_radio_switch,
+                        send_radio_display,
+                        send_cockpit_display,
+                        send_proxi,
+                        send_status,
+                    ],
+                ))
+                .chain(process_debounce_buttons(raw_buttons, &buttons))
+                .chain(process_recv(
+                    &driver,
+                    &bus.service,
+                    send_status,
+                    send_proxi,
+                    &radio,
+                    raw_buttons,
+                ))
+                .await;
 
-    bus.service.stopped();
+            driver.stop()?;
 
-    res
+            bus.service.stopped();
+
+            res?;
+        }
+    }
 }
 
 fn create<'d>(
@@ -668,10 +679,10 @@ fn create<'d>(
 }
 
 async fn process_radio_mux(
-    audio: Receiver<'_, impl RawMutex, AudioState>,
-    phone: Receiver<'_, impl RawMutex, AudioState>,
-    radio: Receiver<'_, impl RawMutex, RadioState>,
-    radio_commands: Sender<'_, impl RawMutex, BtCommand>,
+    audio: &Receiver<'_, impl RawMutex, AudioState>,
+    phone: &Receiver<'_, impl RawMutex, AudioState>,
+    radio: &Receiver<'_, impl RawMutex, RadioState>,
+    radio_commands: &Sender<'_, impl RawMutex, BtCommand>,
     radio_switch_out: &Signal<impl RawMutex, Frame>,
 ) -> Result<(), Error> {
     let mut sradio = RadioState::Unknown;
@@ -707,7 +718,7 @@ async fn process_radio_mux(
 }
 
 async fn process_display(
-    text: SharedStateReceiver<'_, impl RawMutex, DisplayText>,
+    text: &StatefulReceiver<'_, impl RawMutex, DisplayText>,
     for_radio: bool,
     display_out: &Signal<impl RawMutex, Frame>,
 ) -> Result<(), Error> {
@@ -771,13 +782,11 @@ async fn process_send<'d, const N: usize>(
 async fn process_recv<'d>(
     driver: &OwnedAsyncCanDriver<'d>,
     service: &ServiceLifecycle<'_, impl RawMutex>,
-    start: Sender<'_, impl RawMutex, bool>,
     status_out: &Signal<impl RawMutex, Frame>,
     proxi_out: &Signal<impl RawMutex, Frame>,
-    radio: Sender<'_, impl RawMutex, RadioState>,
+    radio: &Sender<'_, impl RawMutex, RadioState>,
     raw_buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), Error> {
-    let mut shutdown_request = false;
     let mut pending_proxi_request = false;
     let mut pending_proxi_value = None;
 
@@ -786,13 +795,9 @@ async fn process_recv<'d>(
         let message: Message<'_> = (&frame).into();
 
         match message.topic {
-            Topic::BodyComputer(payload) => process_recv_body_computer(
-                payload,
-                service,
-                &start,
-                &mut shutdown_request,
-                status_out,
-            ),
+            Topic::BodyComputer(payload) => {
+                process_recv_body_computer(payload, service, status_out)
+            }
             Topic::Proxi(payload) => process_recv_proxi(
                 payload,
                 &mut pending_proxi_request,
@@ -808,7 +813,7 @@ async fn process_recv<'d>(
 
 async fn process_debounce_buttons(
     raw_buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
-    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    buttons: &Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) -> Result<(), Error> {
     const TICK: Duration = Duration::from_millis(10);
 
@@ -904,32 +909,20 @@ fn process_recv_proxi(
 fn process_recv_body_computer(
     payload: BodyComputer<'_>,
     service: &ServiceLifecycle<'_, impl RawMutex>,
-    start: &Sender<'_, impl RawMutex, bool>,
-    shutdown_request: &mut bool,
     status_out: &Signal<impl RawMutex, Frame>,
 ) {
     match payload {
-        BodyComputer::WakeupRequest => {
-            *shutdown_request = false;
-            start.send(true);
-        }
-        BodyComputer::ShutDownRequest => {
-            *shutdown_request = true;
-            start.send(false);
-        }
+        BodyComputer::WakeupRequest => service.sys_start(),
+        BodyComputer::ShutDownRequest => service.sys_stop(),
         BodyComputer::StatusRequest => {
-            let started = service.get_all_started();
-            let shutdown = *shutdown_request;
-
-            let report_state = if !shutdown && (started | service.service()) == EnumSet::ALL {
-                BodyComputer::Active
-            } else if shutdown && (started & !service.service() == EnumSet::EMPTY) {
-                BodyComputer::AboutToSleep
-            } else {
-                BodyComputer::PoweringOn
+            let state = match service.get_sys_state() {
+                SystemState::Stopped => BodyComputer::AboutToSleep,
+                SystemState::Starting => BodyComputer::PoweringOn,
+                SystemState::Started => BodyComputer::Active,
+                SystemState::Stopping => BodyComputer::AboutToSleep,
             };
 
-            status_out.signal(as_frame(Topic::BodyComputer(report_state)));
+            status_out.signal(as_frame(Topic::BodyComputer(state)));
         }
         _ => (),
     }

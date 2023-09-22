@@ -1,13 +1,11 @@
-use core::cell::Cell;
-
-use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex};
-use enumset::{EnumSet, EnumSetType};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use enumset::{enum_set, EnumSet, EnumSetType};
 use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 use crate::{
     can::message::SteeringWheelButton,
-    service::ServiceLifecycle,
-    signal::{Receiver, SharedStateReceiver, SharedStateSpmcSignal, SpmcSignal},
+    service::{ServiceLifecycle, System},
+    signal::{BroadcastSignal, Receiver, StatefulBroadcastSignal, StatefulReceiver},
 };
 
 use self::{
@@ -237,6 +235,7 @@ pub mod can {
 #[derive(Debug, EnumSetType)]
 pub enum Service {
     Can,
+    Wifi,
     Microphone,
     Speakers,
     AudioMux,
@@ -246,44 +245,45 @@ pub enum Service {
     Commands,
 }
 
-pub struct State {
-    pub started_services: Mutex<NoopRawMutex, Cell<EnumSet<Service>>>,
-    pub start: SpmcSignal<NoopRawMutex, bool>,
-    pub bt: SpmcSignal<EspRawMutex, BtState>,
-    pub audio: SpmcSignal<EspRawMutex, AudioState>,
-    pub audio_track: SharedStateSpmcSignal<EspRawMutex, TrackInfo>,
-    pub phone: SpmcSignal<EspRawMutex, AudioState>,
-    pub phone_call: SharedStateSpmcSignal<EspRawMutex, PhoneCallInfo>,
-    pub button_commands: SpmcSignal<NoopRawMutex, BtCommand>,
-    pub radio_commands: SpmcSignal<NoopRawMutex, BtCommand>,
-    pub radio: SpmcSignal<NoopRawMutex, RadioState>,
-    pub buttons: SpmcSignal<NoopRawMutex, EnumSet<SteeringWheelButton>>,
-    pub cockpit_display: SharedStateSpmcSignal<NoopRawMutex, DisplayText>,
-    pub radio_display: SharedStateSpmcSignal<NoopRawMutex, DisplayText>,
+pub struct Bus {
+    pub system: StatefulBroadcastSignal<NoopRawMutex, System>,
+    pub bt: BroadcastSignal<EspRawMutex, BtState>,
+    pub audio: BroadcastSignal<EspRawMutex, AudioState>,
+    pub audio_track: StatefulBroadcastSignal<EspRawMutex, TrackInfo>,
+    pub phone: BroadcastSignal<EspRawMutex, AudioState>,
+    pub phone_call: StatefulBroadcastSignal<EspRawMutex, PhoneCallInfo>,
+    pub button_commands: BroadcastSignal<NoopRawMutex, BtCommand>,
+    pub radio_commands: BroadcastSignal<NoopRawMutex, BtCommand>,
+    pub radio: BroadcastSignal<NoopRawMutex, RadioState>,
+    pub buttons: BroadcastSignal<NoopRawMutex, EnumSet<SteeringWheelButton>>,
+    pub cockpit_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
+    pub radio_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
 }
 
-impl State {
+impl Bus {
     pub const fn new() -> Self {
         Self {
-            started_services: Mutex::new(Cell::new(EnumSet::EMPTY)),
-            start: SpmcSignal::new(),
-            bt: SpmcSignal::new(),
-            audio: SpmcSignal::new(),
-            audio_track: SharedStateSpmcSignal::new(TrackInfo::new()),
-            phone: SpmcSignal::new(),
-            phone_call: SharedStateSpmcSignal::new(PhoneCallInfo::new()),
-            button_commands: SpmcSignal::new(),
-            radio_commands: SpmcSignal::new(),
-            radio: SpmcSignal::new(),
-            buttons: SpmcSignal::new(),
-            cockpit_display: SharedStateSpmcSignal::new(DisplayText::new()),
-            radio_display: SharedStateSpmcSignal::new(DisplayText::new()),
+            system: StatefulBroadcastSignal::new(System::new(
+                EnumSet::EMPTY,
+                enum_set!(Service::Can),
+            )),
+            bt: BroadcastSignal::new(),
+            audio: BroadcastSignal::new(),
+            audio_track: StatefulBroadcastSignal::new(TrackInfo::new()),
+            phone: BroadcastSignal::new(),
+            phone_call: StatefulBroadcastSignal::new(PhoneCallInfo::new()),
+            button_commands: BroadcastSignal::new(),
+            radio_commands: BroadcastSignal::new(),
+            radio: BroadcastSignal::new(),
+            buttons: BroadcastSignal::new(),
+            cockpit_display: StatefulBroadcastSignal::new(DisplayText::new()),
+            radio_display: StatefulBroadcastSignal::new(DisplayText::new()),
         }
     }
 
     pub fn subscription(&self, service: Service) -> BusSubscription<'_> {
         BusSubscription {
-            service: ServiceLifecycle::new(service, &self.start, &self.started_services),
+            service: ServiceLifecycle::new(service, &self.system),
             bt: self.bt.receiver(service),
             audio: self.audio.receiver(service),
             audio_track: self.audio_track.receiver(service),
@@ -303,13 +303,13 @@ pub struct BusSubscription<'a> {
     pub service: ServiceLifecycle<'a, NoopRawMutex>,
     pub bt: Receiver<'a, EspRawMutex, BtState>,
     pub audio: Receiver<'a, EspRawMutex, AudioState>,
-    pub audio_track: SharedStateReceiver<'a, EspRawMutex, TrackInfo>,
+    pub audio_track: StatefulReceiver<'a, EspRawMutex, TrackInfo>,
     pub phone: Receiver<'a, EspRawMutex, AudioState>,
-    pub phone_call: SharedStateReceiver<'a, EspRawMutex, PhoneCallInfo>,
+    pub phone_call: StatefulReceiver<'a, EspRawMutex, PhoneCallInfo>,
     pub button_commands: Receiver<'a, NoopRawMutex, BtCommand>,
     pub radio_commands: Receiver<'a, NoopRawMutex, BtCommand>,
     pub radio: Receiver<'a, NoopRawMutex, RadioState>,
     pub buttons: Receiver<'a, NoopRawMutex, EnumSet<SteeringWheelButton>>,
-    pub cockpit_display: SharedStateReceiver<'a, NoopRawMutex, DisplayText>,
-    pub radio_display: SharedStateReceiver<'a, NoopRawMutex, DisplayText>,
+    pub cockpit_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
+    pub radio_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
 }
