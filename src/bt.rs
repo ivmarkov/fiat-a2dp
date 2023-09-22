@@ -1,3 +1,5 @@
+use core::cell::RefCell;
+
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use esp_idf_svc::bt::a2dp::{AudioStatus, ConnectionStatus};
@@ -22,8 +24,7 @@ use esp_idf_svc::hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral};
 
 use log::*;
 
-use crate::audio::AUDIO_BUFFERS;
-
+use crate::audio::SharedAudioBuffers;
 use crate::bus::{
     bt::{
         AudioState, AudioTrackState, BtCommand, BtState, PhoneCallInfo, PhoneCallState, TrackInfo,
@@ -35,7 +36,7 @@ use crate::select_spawn::SelectSpawn;
 use crate::signal::{Receiver, Sender, StatefulSender};
 
 pub async fn process(
-    mut modem: impl Peripheral<P = impl BluetoothModemPeripheral>,
+    modem: &RefCell<impl Peripheral<P = impl BluetoothModemPeripheral>>,
     nvs: EspDefaultNvsPartition,
     bus: BusSubscription<'_>,
     bt: Sender<'_, impl RawMutex + Sync, BtState>,
@@ -43,12 +44,15 @@ pub async fn process(
     audio_track: StatefulSender<'_, impl RawMutex + Sync, TrackInfo>,
     phone: Sender<'_, impl RawMutex + Sync, AudioState>,
     phone_call: StatefulSender<'_, impl RawMutex + Sync, PhoneCallInfo>,
+    audio_buffers: &SharedAudioBuffers,
 ) -> Result<(), Error> {
     loop {
         bus.service.wait_enabled().await?;
 
         {
             bus.service.starting();
+
+            let mut modem = modem.borrow_mut();
 
             let driver = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
 
@@ -99,11 +103,11 @@ pub async fn process(
 
             info!("AVRCC initialized");
 
-            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio, event))?;
+            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio, audio_buffers, event))?;
 
             info!("A2DP initialized");
 
-            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone, &phone_call, event))?;
+            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone, &phone_call, audio_buffers, event))?;
 
             info!("HFPC initialized");
 
@@ -168,6 +172,7 @@ fn handle_gap<'d, M>(
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
     audio: &Sender<'_, impl RawMutex, AudioState>,
+    audio_buffers: &SharedAudioBuffers,
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
@@ -186,7 +191,7 @@ fn handle_a2dp<'d, M>(
             AudioStatus::Stopped => audio.send(AudioState::Connected),
         },
         A2dpEvent::SinkData(data) => {
-            AUDIO_BUFFERS.lock(|buffers| {
+            audio_buffers.lock(|buffers| {
                 buffers.borrow_mut().push_incoming(data, true, || {});
             });
         }
@@ -292,6 +297,7 @@ fn handle_hfpc<'d, M>(
     hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
     phone: &Sender<'_, impl RawMutex, AudioState>,
     phone_call: &StatefulSender<'_, impl RawMutex, PhoneCallInfo>,
+    audio_buffers: &SharedAudioBuffers,
     event: HfpcEvent<'_>,
 ) -> usize
 where
@@ -370,7 +376,7 @@ where
         //     0
         // }
         HfpcEvent::RecvData(data) => {
-            AUDIO_BUFFERS.lock(|buffers| {
+            audio_buffers.lock(|buffers| {
                 buffers.borrow_mut().push_incoming(data, false, || {
                     hfpc.request_outgoing_data_ready();
                 })
@@ -379,7 +385,7 @@ where
             0
         }
         HfpcEvent::SendData(data) => {
-            AUDIO_BUFFERS.lock(|buffers| buffers.borrow_mut().pop_outgoing(data, false))
+            audio_buffers.lock(|buffers| buffers.borrow_mut().pop_outgoing(data, false))
         }
         _ => 0,
     }

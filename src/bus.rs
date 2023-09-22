@@ -258,6 +258,7 @@ pub struct Bus {
     pub buttons: BroadcastSignal<NoopRawMutex, EnumSet<SteeringWheelButton>>,
     pub cockpit_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
     pub radio_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
+    pub update: BroadcastSignal<NoopRawMutex, ()>,
 }
 
 impl Bus {
@@ -278,6 +279,7 @@ impl Bus {
             buttons: BroadcastSignal::new(),
             cockpit_display: StatefulBroadcastSignal::new(DisplayText::new()),
             radio_display: StatefulBroadcastSignal::new(DisplayText::new()),
+            update: BroadcastSignal::new(),
         }
     }
 
@@ -295,6 +297,7 @@ impl Bus {
             buttons: self.buttons.receiver(service),
             cockpit_display: self.cockpit_display.receiver(service),
             radio_display: self.radio_display.receiver(service),
+            update: self.update.receiver(service),
         }
     }
 }
@@ -312,4 +315,5 @@ pub struct BusSubscription<'a> {
     pub buttons: Receiver<'a, NoopRawMutex, EnumSet<SteeringWheelButton>>,
     pub cockpit_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
     pub radio_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
+    pub update: Receiver<'a, NoopRawMutex, ()>,
 }

@@ -1,19 +1,23 @@
+use core::cell::RefCell;
 use core::mem::MaybeUninit;
 
 use embassy_time::{Duration, Timer};
 
+use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::task::executor::EspExecutor;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
+use esp_idf_svc::timer::EspTimerService;
 
+use crate::audio::create_audio_buffers;
 use crate::bus::{Bus, Service};
 use crate::error::Error;
 use crate::flash_mode::FlashMode;
-use crate::{audio, bt, can, commands, displays};
+use crate::{audio, bt, can, commands, displays, updates};
 
 pub fn run(peripherals: Peripherals) -> Result<(), Error> {
-    let modem = peripherals.modem;
+    let modem = RefCell::new(peripherals.modem);
 
     let adc1 = peripherals.adc1;
     let adc_pin = peripherals.pins.gpio32;
@@ -44,10 +48,12 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
 
     let bus = Bus::new();
 
+    let audio_buffers = Box::new(create_audio_buffers());
+
     executor
         .spawn_local_collect(
             bt::process(
-                modem,
+                &modem,
                 nvs,
                 bus.subscription(Service::Bt),
                 bus.bt.sender(),
@@ -55,11 +61,12 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
                 bus.audio_track.sender(),
                 bus.phone.sender(),
                 bus.phone_call.sender(),
+                &audio_buffers,
             ),
             &mut tasks,
         )?
         .spawn_local_collect(
-            audio::process_audio_mux(bus.subscription(Service::AudioMux)),
+            audio::process_audio_mux(bus.subscription(Service::AudioMux), &audio_buffers),
             &mut tasks,
         )?
         .spawn_local_collect(
@@ -69,6 +76,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
                 adc_pin,
                 i2s0,
                 adc_buf,
+                &audio_buffers,
                 || {},
             ),
             &mut tasks,
@@ -80,6 +88,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
                 i2s_bclk,
                 i2s_dout,
                 i2s_ws,
+                &audio_buffers,
                 i2s_buf,
             ),
             &mut tasks,
@@ -108,6 +117,15 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
                 bus.subscription(Service::Can),
                 FlashMode::new(flash_mode_flash, flash_mode_reset)?,
                 bus.button_commands.sender(),
+            ),
+            &mut tasks,
+        )?
+        .spawn_local_collect(
+            updates::process(
+                bus.subscription(Service::Wifi),
+                &modem,
+                EspSystemEventLoop::take()?,
+                EspTimerService::new()?,
             ),
             &mut tasks,
         )?

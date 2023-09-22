@@ -124,12 +124,18 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
     }
 }
 
-pub static AUDIO_BUFFERS: Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>> =
-    Mutex::new(RefCell::new(AudioBuffers::new(true)));
+pub type SharedAudioBuffers = Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>;
+
+pub fn create_audio_buffers() -> SharedAudioBuffers {
+    Mutex::new(RefCell::new(AudioBuffers::new(true)))
+}
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
-pub async fn process_audio_mux(bus: BusSubscription<'_>) -> Result<(), Error> {
+pub async fn process_audio_mux(
+    bus: BusSubscription<'_>,
+    audio_buffers: &SharedAudioBuffers,
+) -> Result<(), Error> {
     loop {
         bus.service.wait_enabled().await?;
 
@@ -142,7 +148,7 @@ pub async fn process_audio_mux(bus: BusSubscription<'_>) -> Result<(), Error> {
             match state {
                 Either::First(other) => break other,
                 Either::Second(state) => {
-                    AUDIO_BUFFERS.lock(|buffers| {
+                    audio_buffers.lock(|buffers| {
                         buffers.borrow_mut().set_a2dp(!state.is_active());
                     });
                 }
@@ -157,6 +163,7 @@ pub async fn process_microphone(
     mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>>,
     mut i2s0: impl Peripheral<P = I2S0>,
     buf: &mut [AdcMeasurement],
+    audio_buffers: &SharedAudioBuffers,
     notify_outgoing: impl Fn(),
 ) -> Result<(), Error> {
     loop {
@@ -183,6 +190,7 @@ pub async fn process_microphone(
                 .chain(process_microphone_reading(
                     &mut driver,
                     buf,
+                    audio_buffers,
                     &notify_outgoing,
                 ))
                 .await;
@@ -197,6 +205,7 @@ pub async fn process_microphone(
 async fn process_microphone_reading<'d>(
     driver: &mut AdcContDriver<'d>,
     adc_buf: &mut [AdcMeasurement],
+    audio_buffers: &SharedAudioBuffers,
     notify_outgoing: impl Fn(),
 ) -> Result<(), Error> {
     loop {
@@ -213,7 +222,7 @@ async fn process_microphone_reading<'d>(
                 }
 
                 if len > 0 {
-                    AUDIO_BUFFERS.lock(|buffers| {
+                    audio_buffers.lock(|buffers| {
                         let mut buffers = buffers.borrow_mut();
 
                         buffers.push_outgoing(as_u8_slice(&adc_buf[..(len >> 2)]), false);
@@ -222,7 +231,7 @@ async fn process_microphone_reading<'d>(
                     });
                 }
             } else {
-                AUDIO_BUFFERS.lock(|buffers| {
+                audio_buffers.lock(|buffers| {
                     if !buffers.borrow().is_a2dp() {
                         let mut buffers = buffers.borrow_mut();
                         let outgoing = buffers.outgoing();
@@ -254,6 +263,7 @@ pub async fn process_speakers(
     mut bclk: impl Peripheral<P = impl InputPin + OutputPin>,
     mut dout: impl Peripheral<P = impl OutputPin>,
     mut ws: impl Peripheral<P = impl InputPin + OutputPin>,
+    audio_buffers: &SharedAudioBuffers,
     buf: &mut [u8],
 ) -> Result<(), Error> {
     loop {
@@ -262,7 +272,7 @@ pub async fn process_speakers(
         {
             bus.service.starting();
 
-            let mut a2dp_conf = AUDIO_BUFFERS.lock(|buffers| buffers.borrow().is_a2dp());
+            let mut a2dp_conf = audio_buffers.lock(|buffers| buffers.borrow().is_a2dp());
 
             loop {
                 info!("Creating I2S output with A2DP: {}", a2dp_conf);
@@ -275,7 +285,7 @@ pub async fn process_speakers(
 
                 let res = select(
                     bus.service.wait_disabled(),
-                    process_speakers_writing(&mut driver, buf, &mut a2dp_conf),
+                    process_speakers_writing(&mut driver, buf, audio_buffers, &mut a2dp_conf),
                 )
                 .await;
 
@@ -293,10 +303,11 @@ pub async fn process_speakers(
 async fn process_speakers_writing<'d>(
     driver: &mut I2sDriver<'d, impl I2sTxSupported>,
     buf: &mut [u8],
+    audio_buffers: &SharedAudioBuffers,
     a2dp_conf: &mut bool,
 ) -> Result<(), Error> {
     loop {
-        let (len, a2dp) = AUDIO_BUFFERS.lock(|buffers| {
+        let (len, a2dp) = audio_buffers.lock(|buffers| {
             let mut buffers = buffers.borrow_mut();
             let a2dp = buffers.a2dp;
 

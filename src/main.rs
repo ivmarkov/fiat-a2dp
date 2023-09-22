@@ -18,6 +18,7 @@ mod run;
 mod select_spawn;
 mod service;
 mod signal;
+mod updates;
 
 fn main() -> Result<(), Error> {
     esp_idf_svc::sys::link_patches();
