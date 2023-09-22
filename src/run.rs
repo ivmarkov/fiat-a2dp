@@ -48,7 +48,12 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
 
     let bus = Bus::new();
 
-    let audio_buffers = Box::new(create_audio_buffers());
+    let mut audio_incoming = Box::new(MaybeUninit::new([0_u8; 32768]));
+    let mut audio_outgoing = Box::new(MaybeUninit::new([0_u8; 8192]));
+
+    let audio_buffers = create_audio_buffers(unsafe { audio_incoming.assume_init_mut() }, unsafe {
+        audio_outgoing.assume_init_mut()
+    });
 
     executor
         .spawn_local_collect(

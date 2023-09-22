@@ -44,7 +44,7 @@ pub async fn process(
     audio_track: StatefulSender<'_, impl RawMutex + Sync, TrackInfo>,
     phone: Sender<'_, impl RawMutex + Sync, AudioState>,
     phone_call: StatefulSender<'_, impl RawMutex + Sync, PhoneCallInfo>,
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
 ) -> Result<(), Error> {
     loop {
         bus.service.wait_enabled().await?;
@@ -172,7 +172,7 @@ fn handle_gap<'d, M>(
 fn handle_a2dp<'d, M>(
     _a2dp: &EspA2dp<'d, M, &BtDriver<'d, M>, impl SinkEnabled>,
     audio: &Sender<'_, impl RawMutex, AudioState>,
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     event: A2dpEvent<'_>,
 ) where
     M: BtClassicEnabled,
@@ -297,7 +297,7 @@ fn handle_hfpc<'d, M>(
     hfpc: &EspHfpc<'d, M, &BtDriver<'d, M>>,
     phone: &Sender<'_, impl RawMutex, AudioState>,
     phone_call: &StatefulSender<'_, impl RawMutex, PhoneCallInfo>,
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     event: HfpcEvent<'_>,
 ) -> usize
 where

@@ -28,18 +28,18 @@ use crate::error::Error;
 use crate::ringbuf::RingBuf;
 use crate::select_spawn::SelectSpawn;
 
-pub struct AudioBuffers<const I: usize, const O: usize> {
-    ringbuf_incoming: RingBuf<{ I }>,
-    ringbuf_outgoing: RingBuf<{ O }>,
+pub struct AudioBuffers<'a> {
+    ringbuf_incoming: RingBuf<'a>,
+    ringbuf_outgoing: RingBuf<'a>,
     a2dp: bool,
 }
 
-impl<const I: usize, const O: usize> AudioBuffers<I, O> {
+impl<'a> AudioBuffers<'a> {
     #[inline(always)]
-    const fn new(a2dp: bool) -> Self {
+    fn new(a2dp: bool, incoming: &'a mut [u8], outgoing: &'a mut [u8]) -> Self {
         Self {
-            ringbuf_incoming: RingBuf::new(),
-            ringbuf_outgoing: RingBuf::new(),
+            ringbuf_incoming: RingBuf::new(incoming),
+            ringbuf_outgoing: RingBuf::new(outgoing),
             a2dp,
         }
     }
@@ -59,7 +59,7 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
     }
 
     #[inline(always)]
-    fn outgoing(&mut self) -> &mut RingBuf<O> {
+    fn outgoing(&mut self) -> &mut RingBuf<'a> {
         &mut self.ringbuf_outgoing
     }
 
@@ -115,26 +115,36 @@ impl<const I: usize, const O: usize> AudioBuffers<I, O> {
     #[inline(always)]
     fn is_incoming_above_watermark(&self, a2dp: bool) -> bool {
         self.a2dp == a2dp
-            && self.ringbuf_incoming.len() >= (if a2dp { I / 3 * 2 } else { I / 12 * 2 })
+            && self.ringbuf_incoming.len()
+                >= (if a2dp {
+                    self.ringbuf_incoming.buf_len() / 3 * 2
+                } else {
+                    self.ringbuf_incoming.buf_len() / 12 * 2
+                })
     }
 
     #[inline(always)]
     fn is_outgoing_above_watermark(&self, a2dp: bool) -> bool {
-        self.a2dp == a2dp && !a2dp && self.ringbuf_outgoing.len() >= O / 3 * 2
+        self.a2dp == a2dp
+            && !a2dp
+            && self.ringbuf_outgoing.len() >= self.ringbuf_outgoing.buf_len() / 3 * 2
     }
 }
 
-pub type SharedAudioBuffers = Mutex<EspRawMutex, RefCell<AudioBuffers<32768, 8192>>>;
+pub type SharedAudioBuffers<'a> = Mutex<EspRawMutex, RefCell<AudioBuffers<'a>>>;
 
-pub fn create_audio_buffers() -> SharedAudioBuffers {
-    Mutex::new(RefCell::new(AudioBuffers::new(true)))
+pub fn create_audio_buffers<'a>(
+    incoming: &'a mut [u8],
+    outgoing: &'a mut [u8],
+) -> SharedAudioBuffers<'a> {
+    Mutex::new(RefCell::new(AudioBuffers::new(true, incoming, outgoing)))
 }
 
 static AUDIO_BUFFERS_INCOMING_NOTIF: Signal<EspRawMutex, ()> = Signal::new();
 
 pub async fn process_audio_mux(
     bus: BusSubscription<'_>,
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
 ) -> Result<(), Error> {
     loop {
         bus.service.wait_enabled().await?;
@@ -163,7 +173,7 @@ pub async fn process_microphone(
     mut pin: impl Peripheral<P = impl ADCPin<Adc = ADC1>>,
     mut i2s0: impl Peripheral<P = I2S0>,
     buf: &mut [AdcMeasurement],
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     notify_outgoing: impl Fn(),
 ) -> Result<(), Error> {
     loop {
@@ -205,7 +215,7 @@ pub async fn process_microphone(
 async fn process_microphone_reading<'d>(
     driver: &mut AdcContDriver<'d>,
     adc_buf: &mut [AdcMeasurement],
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     notify_outgoing: impl Fn(),
 ) -> Result<(), Error> {
     loop {
@@ -263,7 +273,7 @@ pub async fn process_speakers(
     mut bclk: impl Peripheral<P = impl InputPin + OutputPin>,
     mut dout: impl Peripheral<P = impl OutputPin>,
     mut ws: impl Peripheral<P = impl InputPin + OutputPin>,
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     buf: &mut [u8],
 ) -> Result<(), Error> {
     loop {
@@ -303,7 +313,7 @@ pub async fn process_speakers(
 async fn process_speakers_writing<'d>(
     driver: &mut I2sDriver<'d, impl I2sTxSupported>,
     buf: &mut [u8],
-    audio_buffers: &SharedAudioBuffers,
+    audio_buffers: &SharedAudioBuffers<'_>,
     a2dp_conf: &mut bool,
 ) -> Result<(), Error> {
     loop {
