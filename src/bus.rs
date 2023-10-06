@@ -1,5 +1,5 @@
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use enumset::{enum_set, EnumSet, EnumSetType};
+use enumset::{EnumSet, EnumSetType};
 use esp_idf_svc::hal::task::embassy_sync::EspRawMutex;
 
 use crate::{
@@ -234,15 +234,15 @@ pub mod can {
 
 #[derive(Debug, EnumSetType)]
 pub enum Service {
-    Can,
-    Wifi,
+    Bt,
+    AudioMux,
     Microphone,
     Speakers,
-    AudioMux,
-    Bt,
-    CockpitDisplay,
+    Can,
     RadioDisplay,
+    CockpitDisplay,
     Commands,
+    Wifi,
 }
 
 pub struct Bus {
@@ -264,10 +264,7 @@ pub struct Bus {
 impl Bus {
     pub const fn new() -> Self {
         Self {
-            system: StatefulBroadcastSignal::new(System::new(
-                EnumSet::EMPTY,
-                enum_set!(Service::Can),
-            )),
+            system: StatefulBroadcastSignal::new(System::new()),
             bt: BroadcastSignal::new(),
             audio: BroadcastSignal::new(),
             audio_track: StatefulBroadcastSignal::new(TrackInfo::new()),

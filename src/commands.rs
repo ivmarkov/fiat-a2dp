@@ -13,6 +13,7 @@ use crate::{
     },
     can::message::SteeringWheelButton,
     error::Error,
+    service::ServiceLifecycle,
     signal::{Receiver, Sender, StatefulReceiver},
     usb_cutoff::UsbCutoff,
 };
@@ -44,6 +45,7 @@ pub async fn process(
 ) -> Result<(), Error> {
     let usb_cutoff_disable_period = Cell::new(true);
     let usb_cutoff_disable = Cell::new(false);
+    let service_mode = Cell::new(false);
 
     loop {
         bus.service.starting();
@@ -58,12 +60,15 @@ pub async fn process(
                     &mut usb_cutoff,
                     &usb_cutoff_disable_period,
                     &usb_cutoff_disable,
+                    &service_mode,
+                    &bus.service,
                 ),
                 process_buttons(
                     &bus.buttons,
                     &status,
                     &usb_cutoff_disable_period,
                     &usb_cutoff_disable,
+                    &service_mode,
                     &button_commands,
                 ),
                 process_status(
@@ -90,15 +95,19 @@ async fn process_usb_cutoff(
     usb_cutoff: &mut UsbCutoff<'_>,
     usb_cutoff_disable_period: &Cell<bool>,
     usb_cutoff_disable: &Cell<bool>,
+    service_mode: &Cell<bool>,
+    service: &ServiceLifecycle<'_, impl RawMutex>,
 ) -> Result<(), Error> {
-    if usb_cutoff_disable_period.get() {
-        Timer::after(Duration::from_secs(3)).await;
-        usb_cutoff_disable_period.set(false);
-    }
+    // if usb_cutoff_disable_period.get() {
+    //     Timer::after(Duration::from_secs(2)).await;
+    //     usb_cutoff_disable_period.set(false);
+    // }
 
-    if !usb_cutoff_disable.get() {
-        usb_cutoff.cutoff()?;
-    }
+    // if !usb_cutoff_disable.get() {
+    //     usb_cutoff.cutoff()?;
+    // } else if !service_mode.get() {
+    service.sys_set_normal_mode();
+    // }
 
     core::future::pending().await
 }
@@ -108,6 +117,7 @@ async fn process_buttons(
     status: &RefCell<Status>,
     usb_cutoff_disable_period: &Cell<bool>,
     usb_cutoff_disable: &Cell<bool>,
+    service_mode: &Cell<bool>,
     button_commands: &Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
     let mut sbuttons = EnumSet::EMPTY;
@@ -125,12 +135,17 @@ async fn process_buttons(
         if status.phone.is_active() {
             conf = false;
         } else {
-            if just_pressed.contains(SteeringWheelButton::Windows) {
-                if usb_cutoff_disable_period.get() && sbuttons.contains(SteeringWheelButton::Mute) {
-                    usb_cutoff_disable.set(true);
-                } else {
-                    conf = !conf;
+            if usb_cutoff_disable_period.get()
+                && sbuttons.contains(SteeringWheelButton::Mute)
+                && sbuttons.contains(SteeringWheelButton::Windows)
+            {
+                usb_cutoff_disable.set(true);
+
+                if sbuttons.contains(SteeringWheelButton::VolumeUp) {
+                    service_mode.set(true);
                 }
+            } else {
+                conf = !conf;
             }
         }
 

@@ -29,13 +29,17 @@ pub struct System {
 }
 
 impl System {
-    pub const fn new(enabled: EnumSet<Service>, always_on: EnumSet<Service>) -> Self {
+    pub const fn new() -> Self {
         Self {
-            enabled,
-            always_on,
+            enabled: EnumSet::EMPTY,
+            always_on: ALWAYS_ON,
             started: EnumSet::EMPTY,
             sys_enabled: true,
         }
+    }
+
+    pub fn set_service_mode(&mut self) {
+        self.enabled = EnumSet::EMPTY;
     }
 
     pub fn set_update_mode(&mut self) {
@@ -88,10 +92,6 @@ where
         self.service
     }
 
-    pub fn get_sys_state(&self) -> SystemState {
-        self.receiver.state(|state| state.get_state())
-    }
-
     pub fn starting(&self) {
         info!("Starting service {:?}", self.service);
     }
@@ -123,6 +123,31 @@ where
             } else {
                 false
             }
+        });
+    }
+
+    pub fn get_sys_state(&self) -> SystemState {
+        self.receiver.state(|state| state.get_state())
+    }
+
+    pub fn sys_set_service_mode(&self) {
+        self.sender.modify(|sys| {
+            sys.set_service_mode();
+            true
+        });
+    }
+
+    pub fn sys_set_update_mode(&self) {
+        self.sender.modify(|sys| {
+            sys.set_update_mode();
+            true
+        });
+    }
+
+    pub fn sys_set_normal_mode(&self) {
+        self.sender.modify(|sys| {
+            sys.set_normal_mode();
+            true
         });
     }
 

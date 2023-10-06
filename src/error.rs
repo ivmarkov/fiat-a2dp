@@ -1,11 +1,12 @@
 use core::fmt::{Display, Formatter, Result};
 
-use esp_idf_svc::{hal::task::executor::SpawnError, sys::EspError};
+//use futures::task::SpawnError;
+use esp_idf_svc::sys::EspError;
 
 #[derive(Debug)]
 pub enum Error {
     EspError(EspError),
-    SpawnError(SpawnError),
+    //SpawnError(SpawnError),
 }
 
 impl From<EspError> for Error {
@@ -14,17 +15,17 @@ impl From<EspError> for Error {
     }
 }
 
-impl From<SpawnError> for Error {
-    fn from(error: SpawnError) -> Self {
-        Self::SpawnError(error)
-    }
-}
+// impl From<SpawnError> for Error {
+//     fn from(error: SpawnError) -> Self {
+//         Self::SpawnError(error)
+//     }
+// }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Self::EspError(error) => error.fmt(f),
-            Self::SpawnError(error) => error.fmt(f),
+            //Self::SpawnError(error) => error.fmt(f),
         }
     }
 }

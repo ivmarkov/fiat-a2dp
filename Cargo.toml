@@ -18,17 +18,24 @@ embedded-svc = { path = "../embedded-svc" }
 esp-idf-hal = { path = "../esp-idf-hal" }
 esp-idf-svc = { path = "../esp-idf-svc" }
 esp-idf-sys = { path = "../esp-idf-sys" }
+async-io = { git = "https://github.com/smol-rs/async-io" }
+edge-net = { path = "../edge-net" }
+edge-executor = { path = "../edge-executor" }
 
 [dependencies]
-log = "0.4.17"
-esp-idf-svc = { version = "0.46", features = ["nightly", "experimental", "critical-section", "embassy-sync", "embassy-time-driver", "edge-executor"] }
+esp-idf-svc = { version = "0.46", features = ["nightly", "experimental", "critical-section", "embassy-sync", "embassy-time-driver"] }
 heapless = "0.7"
 num_enum = { version = "0.7", default-features = false }
+log = "0.4.17"
 enumset = { version = "1", default-features = false }
 embassy-time = { version = "0.1", features = ["generic-queue"] }
 embassy-futures = "0.1"
 embassy-sync = "0.2"
 static_cell = { version = "1.2", features = ["nightly"] }
+edge-net = { version = "0.3", features = ["nightly"] }
+#edge-executor = { version = "0.3", features = ["esp-idf"] }
+async-executor = "1"
+futures-lite = "1"
 
 [build-dependencies]
 embuild = "0.31.2"
