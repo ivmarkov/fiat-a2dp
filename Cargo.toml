@@ -30,12 +30,10 @@ log = "0.4.17"
 enumset = { version = "1", default-features = false }
 embassy-time = { version = "0.1", features = ["generic-queue"] }
 embassy-futures = "0.1"
-embassy-sync = "0.2"
+embassy-sync = "0.3"
 static_cell = { version = "1.2", features = ["nightly"] }
 edge-net = { version = "0.3", features = ["nightly"] }
-#edge-executor = { version = "0.3", features = ["esp-idf"] }
-async-executor = "1"
-futures-lite = "1"
+edge-executor = "0.3"
 
 [build-dependencies]
 embuild = "0.31.2"

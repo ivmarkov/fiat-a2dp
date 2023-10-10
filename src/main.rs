@@ -9,7 +9,6 @@ use esp_idf_svc::bt::reduce_bt_memory;
 use esp_idf_svc::hal::delay;
 use esp_idf_svc::hal::gpio::{InterruptType, PinDriver, Pull};
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::task::notification::Monitor;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::sys::{heap_caps_print_heap_info, MALLOC_CAP_DEFAULT};
 use log::{info, warn};
