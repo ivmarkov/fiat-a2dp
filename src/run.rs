@@ -7,13 +7,11 @@ use embassy_time::{Duration, Timer};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::task::block_on;
-//use esp_idf_svc::hal::interrupt::asynch::HAL_WAKE_RUNNER;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::sys::{heap_caps_print_heap_info, EspError, MALLOC_CAP_DEFAULT};
 use esp_idf_svc::timer::EspTimerService;
 
-use log::{error, info, warn};
+use log::{info, warn};
 
 use crate::audio::create_audio_buffers;
 use crate::bus::{Bus, Service};
@@ -117,19 +115,17 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
         ))
         .detach();
 
-    // executor
-    //     .spawn(
-    //         can::process(
-    //             bus.subscription(Service::Can),
-    //             can,
-    //             tx,
-    //             rx,
-    //             bus.radio.sender(),
-    //             bus.buttons.sender(),
-    //             bus.radio_commands.sender(),
-    //         ),
-    //     )
-    //     .detach();
+    executor
+        .spawn(can::process(
+            bus.subscription(Service::Can),
+            can,
+            tx,
+            rx,
+            bus.radio.sender(),
+            bus.buttons.sender(),
+            bus.radio_commands.sender(),
+        ))
+        .detach();
 
     executor
         .spawn(displays::process_radio(

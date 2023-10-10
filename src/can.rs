@@ -610,55 +610,55 @@ pub async fn process(
 
             let mut driver = create(&mut can, &mut tx, &mut rx)?;
 
-            let raw_buttons = &Signal::<NoopRawMutex, _>::new();
+            // let raw_buttons = &Signal::<NoopRawMutex, _>::new();
 
-            let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
-            let send_radio_display = &Signal::<NoopRawMutex, _>::new();
-            let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
-            let send_proxi = &Signal::<NoopRawMutex, _>::new();
-            let send_status = &Signal::<NoopRawMutex, _>::new();
+            // let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
+            // let send_radio_display = &Signal::<NoopRawMutex, _>::new();
+            // let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
+            // let send_proxi = &Signal::<NoopRawMutex, _>::new();
+            // let send_status = &Signal::<NoopRawMutex, _>::new();
 
             driver.start()?;
 
             bus.service.started();
 
             let res = SelectSpawn::run(bus.service.wait_disabled())
-                .chain(process_radio_mux(
-                    &bus.audio,
-                    &bus.phone,
-                    &bus.radio,
-                    &radio_commands,
-                    send_radio_switch,
-                ))
-                .chain(process_display(
-                    &bus.radio_display,
-                    true,
-                    send_radio_display,
-                ))
-                .chain(process_display(
-                    &bus.cockpit_display,
-                    false,
-                    send_cockpit_display,
-                ))
-                .chain(process_send(
-                    &driver,
-                    &[
-                        send_radio_switch,
-                        send_radio_display,
-                        send_cockpit_display,
-                        send_proxi,
-                        send_status,
-                    ],
-                ))
-                .chain(process_debounce_buttons(raw_buttons, &buttons))
-                .chain(process_recv(
-                    &driver,
-                    &bus.service,
-                    send_status,
-                    send_proxi,
-                    &radio,
-                    raw_buttons,
-                ))
+                //     .chain(process_radio_mux(
+                //         &bus.audio,
+                //         &bus.phone,
+                //         &bus.radio,
+                //         &radio_commands,
+                //         send_radio_switch,
+                //     ))
+                //     .chain(process_display(
+                //         &bus.radio_display,
+                //         true,
+                //         send_radio_display,
+                //     ))
+                //     .chain(process_display(
+                //         &bus.cockpit_display,
+                //         false,
+                //         send_cockpit_display,
+                //     ))
+                //     .chain(process_send(
+                //         &driver,
+                //         &[
+                //             send_radio_switch,
+                //             send_radio_display,
+                //             send_cockpit_display,
+                //             send_proxi,
+                //             send_status,
+                //         ],
+                //     ))
+                //     //.chain(process_debounce_buttons(raw_buttons, &buttons))
+                //     .chain(process_recv(
+                //         &driver,
+                //         &bus.service,
+                //         send_status,
+                //         send_proxi,
+                //         &radio,
+                //         raw_buttons,
+                //     ))
                 .await;
 
             driver.stop()?;
