@@ -156,16 +156,14 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
         })
         .detach();
 
-    // executor
-    //     .spawn(
-    //         updates::process(
-    //             bus.subscription(Service::Wifi),
-    //             &modem,
-    //             EspSystemEventLoop::take()?,
-    //             EspTimerService::new()?,
-    //         ),
-    //     )
-    //     .detach();
+    executor
+        .spawn(updates::process(
+            bus.subscription(Service::Wifi),
+            &modem,
+            EspSystemEventLoop::take()?,
+            EspTimerService::new()?,
+        ))
+        .detach();
 
     // executor
     //     .spawn(
