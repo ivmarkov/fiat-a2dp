@@ -268,17 +268,17 @@ fn handle_avrcc<'d, M>(
         }
         AvrccEvent::Metadata { id, text } => match id {
             MetadataId::Title => audio_track.modify(|track| {
-                track.song = (*text).into();
+                set_text(&mut track.song, text);
                 track.version += 1;
                 true
             }),
             MetadataId::Artist => audio_track.modify(|track| {
-                track.artist = (*text).into();
+                set_text(&mut track.artist, text);
                 track.version += 1;
                 true
             }),
             MetadataId::Album => audio_track.modify(|track| {
-                track.album = (*text).into();
+                set_text(&mut track.album, text);
                 track.version += 1;
                 true
             }),
@@ -412,4 +412,18 @@ where
             MetadataId::Title | MetadataId::Artist | MetadataId::Album | MetadataId::PlayingTime,
         )
         .unwrap();
+}
+
+fn set_text<const N: usize>(buf: &mut heapless::String<N>, text: &str) {
+    buf.clear();
+
+    for c in text.chars() {
+        if buf.push(c).is_err() {
+            buf.pop();
+            buf.pop();
+            buf.pop();
+
+            let _ = buf.push_str("...");
+        }
+    }
 }

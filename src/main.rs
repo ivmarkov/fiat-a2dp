@@ -46,7 +46,7 @@ fn main() -> Result<(), Error> {
     .set()?;
 
     thread::Builder::new()
-        .stack_size(15000)
+        .stack_size(12000)
         .spawn(move || run::run(peripherals).unwrap())
         .unwrap();
 
