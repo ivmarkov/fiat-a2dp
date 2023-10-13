@@ -1,4 +1,5 @@
 use core::cell::RefCell;
+use core::pin::pin;
 
 use embassy_futures::select::{select, Either};
 
@@ -191,20 +192,18 @@ pub async fn process_microphone(
 
             driver.start()?;
 
-            bus.service.started();
+            let _started = bus.service.started();
 
-            let res = SelectSpawn::run(bus.service.wait_disabled())
-                .chain(process_microphone_reading(
+            SelectSpawn::run(&mut pin!(bus.service.wait_disabled()))
+                .chain(&mut pin!(process_microphone_reading(
                     &mut driver,
                     buf,
                     audio_buffers,
                     &notify_outgoing,
-                ))
-                .await;
+                )))
+                .await?;
 
             driver.stop()?;
-
-            res?;
         }
     }
 }

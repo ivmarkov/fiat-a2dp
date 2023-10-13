@@ -1,4 +1,5 @@
 use core::cmp::min;
+use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select_slice, Either, Either3};
 
@@ -298,7 +299,7 @@ pub mod message {
     impl<'a> From<&'a [u8]> for DateTime<'a> {
         fn from(value: &'a [u8]) -> Self {
             match value {
-                value if value.len() == 6 => panic!(), //// TODO
+                value if value.len() == 6 => panic!(), // TODO
                 other => Self::Unknown(other),
             }
         }
@@ -619,7 +620,7 @@ pub async fn process<const N: usize>(
     mut rx: impl Peripheral<P = impl InputPin>,
     str_buf: &mut heapless::String<N>,
     radio: Sender<'_, impl RawMutex, RadioState>,
-    _buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
     radio_commands: Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
     loop {
@@ -632,9 +633,9 @@ pub async fn process<const N: usize>(
 
             let raw_buttons = &Signal::<NoopRawMutex, _>::new();
 
-            //let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
-            //let send_radio_display = &Signal::<NoopRawMutex, _>::new();
-            //let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
+            let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
+            let send_radio_display = &Signal::<NoopRawMutex, _>::new();
+            let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
             let send_proxi = &Signal::<NoopRawMutex, _>::new();
             let send_status = &Signal::<NoopRawMutex, _>::new();
 
@@ -642,36 +643,36 @@ pub async fn process<const N: usize>(
 
             let _started = bus.service.started();
 
-            SelectSpawn::run(bus.service.wait_disabled())
-                // .chain(process_radio_mux(
-                //     &bus.audio,
-                //     &bus.phone,
-                //     &bus.radio,
-                //     &radio_commands,
-                //     send_radio_switch,
-                // ))
-                // .chain(process_display(
-                //     &bus.radio_display,
-                //     true,
-                //     send_radio_display,
-                // ))
-                // .chain(process_display(
-                //     &bus.cockpit_display,
-                //     false,
-                //     send_cockpit_display,
-                // ))
-                // .chain(process_send(
-                //     &driver,
-                //     &[
-                //         send_radio_switch,
-                //         send_radio_display,
-                //         send_cockpit_display,
-                //         send_proxi,
-                //         send_status,
-                //     ],
-                // ))
-                //.chain(process_debounce_buttons(raw_buttons, &buttons))
-                .chain(process_recv(
+            SelectSpawn::run(&mut pin!(bus.service.wait_disabled()))
+                .chain(&mut pin!(process_radio_mux(
+                    &bus.audio,
+                    &bus.phone,
+                    &bus.radio,
+                    &radio_commands,
+                    send_radio_switch,
+                )))
+                .chain(&mut pin!(process_display(
+                    &bus.radio_display,
+                    true,
+                    send_radio_display,
+                )))
+                .chain(&mut pin!(process_display(
+                    &bus.cockpit_display,
+                    false,
+                    send_cockpit_display,
+                )))
+                .chain(&mut pin!(process_send(
+                    &driver,
+                    &[
+                        send_radio_switch,
+                        send_radio_display,
+                        send_cockpit_display,
+                        send_proxi,
+                        send_status,
+                    ],
+                )))
+                .chain(&mut pin!(process_debounce_buttons(raw_buttons, &buttons)))
+                .chain(&mut pin!(process_recv(
                     &driver,
                     str_buf,
                     &bus.service,
@@ -679,7 +680,7 @@ pub async fn process<const N: usize>(
                     send_proxi,
                     &radio,
                     raw_buttons,
-                ))
+                )))
                 .await?;
 
             driver.stop()?;
@@ -758,7 +759,6 @@ async fn process_display<const N: usize>(
                 let text = &text.text;
 
                 let chunk_payload = &text[offset..min(offset + 8, text.len())];
-                //let chunk_payload = &text[offset..text.len()];
                 let chunk = offset / 8;
                 let total_chunks = text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 });
 

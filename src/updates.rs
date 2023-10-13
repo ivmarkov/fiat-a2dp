@@ -1,3 +1,5 @@
+use core::pin::pin;
+
 use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
@@ -22,25 +24,21 @@ pub async fn process(
     timer_service: EspTaskTimerService,
 ) -> Result<(), Error> {
     loop {
-        bus.service.wait_enabled().await?;
+        bus.service.started_when_enabled().await?;
 
-        loop {
-            bus.service.starting();
+        let mut modem = modem.lock().await;
 
-            let mut modem = modem.lock().await;
+        let mut driver = AsyncWifi::wrap(
+            create(&mut modem, sysloop.clone())?,
+            sysloop.clone(),
+            timer_service.clone(),
+        )?;
 
-            let mut driver = AsyncWifi::wrap(
-                create(&mut modem, sysloop.clone())?,
-                sysloop.clone(),
-                timer_service.clone(),
-            )?;
+        let _started = bus.service.started();
 
-            let _started = bus.service.started();
-
-            SelectSpawn::run(bus.service.wait_disabled())
-                .chain(process_update(&mut driver, &bus.update))
-                .await?;
-        }
+        SelectSpawn::run(bus.service.wait_disabled())
+            .chain(&mut pin!(process_update(&mut driver, &bus.update)))
+            .await?;
     }
 }
 
@@ -51,9 +49,9 @@ async fn process_update(
     loop {
         update_request.recv().await;
 
-        // TODO connect(driver).await?;
+        connect(driver).await?;
 
-        // TODO update().await?;
+        update().await?;
 
         driver.stop().await?;
     }

@@ -1,4 +1,7 @@
-use std::cell::{Cell, RefCell};
+use core::{
+    cell::{Cell, RefCell},
+    pin::pin,
+};
 
 use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -53,30 +56,30 @@ pub async fn process(
 
         let status = RefCell::new(Status::new());
 
-        SelectSpawn::run(bus.service.wait_disabled())
-            .chain(process_usb_cutoff(
+        SelectSpawn::run(&mut pin!(bus.service.wait_disabled()))
+            .chain(&mut pin!(process_usb_cutoff(
                 &mut usb_cutoff,
                 &usb_cutoff_disable_period,
                 &usb_cutoff_disable,
                 &service_mode,
                 &bus.service,
-            ))
-            .chain(process_buttons(
+            )))
+            .chain(&mut pin!(process_buttons(
                 &bus.buttons,
                 &status,
                 &usb_cutoff_disable_period,
                 &usb_cutoff_disable,
                 &service_mode,
                 &button_commands,
-            ))
-            .chain(process_status(
+            )))
+            .chain(&mut pin!(process_status(
                 &bus.audio,
                 &bus.audio_track,
                 &bus.phone,
                 &bus.phone_call,
                 &bus.radio,
                 &status,
-            ))
+            )))
             .await?;
     }
 }

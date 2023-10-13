@@ -1,3 +1,5 @@
+use core::pin::pin;
+
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use embassy_sync::mutex::Mutex;
@@ -115,9 +117,19 @@ pub async fn process(
 
             let _started = bus.service.started();
 
-            SelectSpawn::run(bus.service.wait_disabled())
-                .chain(process_commands(&bus.radio_commands, &a2dp, &avrcc, &hfpc))
-                .chain(process_commands(&bus.button_commands, &a2dp, &avrcc, &hfpc))
+            SelectSpawn::run(&mut pin!(bus.service.wait_disabled()))
+                .chain(&mut pin!(process_commands(
+                    &bus.radio_commands,
+                    &a2dp,
+                    &avrcc,
+                    &hfpc
+                )))
+                .chain(&mut pin!(process_commands(
+                    &bus.button_commands,
+                    &a2dp,
+                    &avrcc,
+                    &hfpc
+                )))
                 .await?;
         }
     }

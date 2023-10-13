@@ -56,6 +56,11 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
 
     let bus = Bus::new();
 
+    bus.system.sender().modify(|system| {
+        system.set_normal_mode();
+        true
+    });
+
     let mut audio_incoming: Box<MaybeUninit<[u8; 32768]>> = Box::new_uninit();
     let mut audio_outgoing: Box<MaybeUninit<[u8; 8192]>> = Box::new_uninit();
 
