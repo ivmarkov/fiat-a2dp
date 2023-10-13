@@ -1,4 +1,7 @@
 #![feature(new_uninit)]
+#![warn(clippy::large_futures)]
+#![allow(dead_code)]
+#![allow(unused)]
 
 use std::thread;
 
@@ -46,7 +49,7 @@ fn main() -> Result<(), Error> {
     .set()?;
 
     thread::Builder::new()
-        .stack_size(20000)
+        .stack_size(10000)
         .spawn(move || run::run(peripherals).unwrap())
         .unwrap();
 

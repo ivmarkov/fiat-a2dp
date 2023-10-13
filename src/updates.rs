@@ -1,6 +1,4 @@
-use core::cell::RefCell;
-
-use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::{blocking_mutex::raw::RawMutex, mutex::Mutex};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{modem::WifiModemPeripheral, peripheral::Peripheral},
@@ -19,7 +17,7 @@ use crate::{bus::BusSubscription, error::Error, select_spawn::SelectSpawn, signa
 
 pub async fn process(
     bus: BusSubscription<'_>,
-    modem: &RefCell<impl Peripheral<P = impl WifiModemPeripheral>>,
+    modem: &Mutex<impl RawMutex, impl Peripheral<P = impl WifiModemPeripheral>>,
     sysloop: EspSystemEventLoop,
     timer_service: EspTaskTimerService,
 ) -> Result<(), Error> {
@@ -29,7 +27,7 @@ pub async fn process(
         loop {
             bus.service.starting();
 
-            let mut modem = modem.borrow_mut();
+            let mut modem = modem.lock().await;
 
             let mut driver = AsyncWifi::wrap(
                 create(&mut modem, sysloop.clone())?,
@@ -37,15 +35,11 @@ pub async fn process(
                 timer_service.clone(),
             )?;
 
-            bus.service.started();
+            let _started = bus.service.started();
 
-            let res = SelectSpawn::run(bus.service.wait_disabled())
+            SelectSpawn::run(bus.service.wait_disabled())
                 .chain(process_update(&mut driver, &bus.update))
-                .await;
-
-            bus.service.stopped();
-
-            res?;
+                .await?;
         }
     }
 }
@@ -57,9 +51,9 @@ async fn process_update(
     loop {
         update_request.recv().await;
 
-        connect(driver).await?;
+        // TODO connect(driver).await?;
 
-        update().await?;
+        // TODO update().await?;
 
         driver.stop().await?;
     }

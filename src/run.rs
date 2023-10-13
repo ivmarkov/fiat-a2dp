@@ -1,7 +1,8 @@
-use core::cell::RefCell;
 use core::mem::MaybeUninit;
 
 use edge_executor::LocalExecutor;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
@@ -20,7 +21,7 @@ use crate::usb_cutoff::UsbCutoff;
 use crate::{audio, bt, can, commands, displays, updates};
 
 pub fn run(peripherals: Peripherals) -> Result<(), Error> {
-    let modem = RefCell::new(peripherals.modem);
+    let modem = Mutex::<NoopRawMutex, _>::new(peripherals.modem);
 
     let adc1 = peripherals.adc1;
     let adc_pin = peripherals.pins.gpio32;

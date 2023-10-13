@@ -57,12 +57,10 @@ impl System {
             } else {
                 SystemState::Starting
             }
+        } else if self.started == self.always_on {
+            SystemState::Stopped
         } else {
-            if self.started == self.always_on {
-                SystemState::Stopped
-            } else {
-                SystemState::Stopping
-            }
+            SystemState::Stopping
         }
     }
 }
@@ -74,6 +72,19 @@ where
     service: Service,
     receiver: StatefulReceiver<'d, M, System>,
     sender: StatefulSender<'d, M, System>,
+}
+
+pub struct Started<'a, 'd, M>(&'a ServiceLifecycle<'d, M>)
+where
+    M: RawMutex;
+
+impl<'a, 'd, M> Drop for Started<'a, 'd, M>
+where
+    M: RawMutex,
+{
+    fn drop(&mut self) {
+        self.0.set_started(false);
+    }
 }
 
 impl<'d, M> ServiceLifecycle<'d, M>
@@ -96,12 +107,9 @@ where
         info!("Starting service {:?}", self.service);
     }
 
-    pub fn started(&self) {
+    pub fn started(&self) -> Started<M> {
         self.set_started(true);
-    }
-
-    pub fn stopped(&self) {
-        self.set_started(false);
+        Started(self)
     }
 
     pub fn sys_start(&self) {
@@ -156,8 +164,13 @@ where
     }
 
     pub async fn wait_enabled(&self) -> Result<(), Error> {
-        self.set_started(false);
         self.wait_enabled_disabled(true).await
+    }
+
+    pub async fn started_when_enabled(&self) -> Result<Started<M>, Error> {
+        self.wait_enabled_disabled(true).await?;
+
+        Ok(self.started())
     }
 
     fn set_started(&self, started: bool) {

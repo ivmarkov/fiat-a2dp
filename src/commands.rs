@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 
 use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
-use embassy_time::{Duration, Timer};
+
 use enumset::EnumSet;
 
 use crate::{
@@ -13,6 +13,7 @@ use crate::{
     },
     can::message::SteeringWheelButton,
     error::Error,
+    select_spawn::SelectSpawn,
     service::ServiceLifecycle,
     signal::{Receiver, Sender, StatefulReceiver},
     usb_cutoff::UsbCutoff,
@@ -48,54 +49,43 @@ pub async fn process(
     let service_mode = Cell::new(false);
 
     loop {
-        bus.service.starting();
-        bus.service.started();
+        let _started = bus.service.started_when_enabled().await?;
 
         let status = RefCell::new(Status::new());
 
-        loop {
-            match select4(
-                bus.service.wait_disabled(),
-                process_usb_cutoff(
-                    &mut usb_cutoff,
-                    &usb_cutoff_disable_period,
-                    &usb_cutoff_disable,
-                    &service_mode,
-                    &bus.service,
-                ),
-                process_buttons(
-                    &bus.buttons,
-                    &status,
-                    &usb_cutoff_disable_period,
-                    &usb_cutoff_disable,
-                    &service_mode,
-                    &button_commands,
-                ),
-                process_status(
-                    &bus.audio,
-                    &bus.audio_track,
-                    &bus.phone,
-                    &bus.phone_call,
-                    &bus.radio,
-                    &status,
-                ),
-            )
-            .await
-            {
-                Either4::First(_) => break,
-                _ => unreachable!(),
-            }
-        }
-
-        bus.service.wait_enabled().await?;
+        SelectSpawn::run(bus.service.wait_disabled())
+            .chain(process_usb_cutoff(
+                &mut usb_cutoff,
+                &usb_cutoff_disable_period,
+                &usb_cutoff_disable,
+                &service_mode,
+                &bus.service,
+            ))
+            .chain(process_buttons(
+                &bus.buttons,
+                &status,
+                &usb_cutoff_disable_period,
+                &usb_cutoff_disable,
+                &service_mode,
+                &button_commands,
+            ))
+            .chain(process_status(
+                &bus.audio,
+                &bus.audio_track,
+                &bus.phone,
+                &bus.phone_call,
+                &bus.radio,
+                &status,
+            ))
+            .await?;
     }
 }
 
 async fn process_usb_cutoff(
-    usb_cutoff: &mut UsbCutoff<'_>,
-    usb_cutoff_disable_period: &Cell<bool>,
-    usb_cutoff_disable: &Cell<bool>,
-    service_mode: &Cell<bool>,
+    _usb_cutoff: &mut UsbCutoff<'_>,
+    _usb_cutoff_disable_period: &Cell<bool>,
+    _usb_cutoff_disable: &Cell<bool>,
+    _service_mode: &Cell<bool>,
     service: &ServiceLifecycle<'_, impl RawMutex>,
 ) -> Result<(), Error> {
     // if usb_cutoff_disable_period.get() {
@@ -134,19 +124,17 @@ async fn process_buttons(
 
         if status.phone.is_active() {
             conf = false;
-        } else {
-            if usb_cutoff_disable_period.get()
-                && sbuttons.contains(SteeringWheelButton::Mute)
-                && sbuttons.contains(SteeringWheelButton::Windows)
-            {
-                usb_cutoff_disable.set(true);
+        } else if usb_cutoff_disable_period.get()
+            && sbuttons.contains(SteeringWheelButton::Mute)
+            && sbuttons.contains(SteeringWheelButton::Windows)
+        {
+            usb_cutoff_disable.set(true);
 
-                if sbuttons.contains(SteeringWheelButton::VolumeUp) {
-                    service_mode.set(true);
-                }
-            } else {
-                conf = !conf;
+            if sbuttons.contains(SteeringWheelButton::VolumeUp) {
+                service_mode.set(true);
             }
+        } else {
+            conf = !conf;
         }
 
         if conf {
@@ -158,9 +146,9 @@ async fn process_buttons(
 }
 
 fn handle_conf(
-    just_pressed: EnumSet<SteeringWheelButton>,
-    status: &Status,
-    button_commands: &Sender<'_, impl RawMutex, BtCommand>,
+    _just_pressed: EnumSet<SteeringWheelButton>,
+    _status: &Status,
+    _button_commands: &Sender<'_, impl RawMutex, BtCommand>,
 ) {
     // TODO
 }
@@ -185,8 +173,8 @@ fn handle_run(
 fn handle_phone_menu(
     just_pressed: EnumSet<SteeringWheelButton>,
     menu: &mut bool,
-    status: &Status,
-    button_commands: &Sender<'_, impl RawMutex, BtCommand>,
+    _status: &Status,
+    _button_commands: &Sender<'_, impl RawMutex, BtCommand>,
 ) {
     // TODO
     if just_pressed.contains(SteeringWheelButton::Up) {
@@ -216,26 +204,22 @@ fn handle_shortcuts(
         PhoneCallState::Idle => {
             if just_pressed.contains(SteeringWheelButton::Menu) {
                 *menu = true;
-            } else if status.radio.is_bt_active() {
-                if status.audio.is_connected() {
-                    if just_pressed.contains(SteeringWheelButton::Mute) {
-                        if matches!(status.audio, AudioState::Streaming) {
-                            button_commands.send(BtCommand::Pause);
-                        } else if matches!(
-                            status.audio,
-                            AudioState::Connected | AudioState::Suspended
-                        ) {
-                            button_commands.send(BtCommand::Resume);
-                        }
-                    } else if just_pressed.contains(SteeringWheelButton::Up)
-                        && status.track.is_connected()
+            } else if status.radio.is_bt_active() && status.audio.is_connected() {
+                if just_pressed.contains(SteeringWheelButton::Mute) {
+                    if matches!(status.audio, AudioState::Streaming) {
+                        button_commands.send(BtCommand::Pause);
+                    } else if matches!(status.audio, AudioState::Connected | AudioState::Suspended)
                     {
-                        button_commands.send(BtCommand::PreviousTrack);
-                    } else if just_pressed.contains(SteeringWheelButton::Down)
-                        && status.track.is_connected()
-                    {
-                        button_commands.send(BtCommand::NextTrack);
+                        button_commands.send(BtCommand::Resume);
                     }
+                } else if just_pressed.contains(SteeringWheelButton::Up)
+                    && status.track.is_connected()
+                {
+                    button_commands.send(BtCommand::PreviousTrack);
+                } else if just_pressed.contains(SteeringWheelButton::Down)
+                    && status.track.is_connected()
+                {
+                    button_commands.send(BtCommand::NextTrack);
                 }
             }
         }

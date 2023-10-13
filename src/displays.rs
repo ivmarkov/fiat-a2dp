@@ -30,8 +30,7 @@ pub async fn process_radio<const N: usize>(
     radio_display: StatefulSender<'_, impl RawMutex, DisplayText<N>>,
 ) -> Result<(), Error> {
     loop {
-        bus.service.starting();
-        bus.service.started();
+        let _started = bus.service.started_when_enabled().await?;
 
         let mut sradio = RadioState::Unknown;
         let mut sphone = PhoneCallState::Idle;
@@ -47,7 +46,7 @@ pub async fn process_radio<const N: usize>(
             .await;
 
             match ret {
-                Either4::First(_) => break,
+                Either4::First(other) => break other?,
                 Either4::Second(new) => sradio = new,
                 Either4::Third(_) => sphone = bus.phone_call.state(|call| call.state),
                 Either4::Fourth(_) => saudio = bus.audio_track.state(|track| track.state),
@@ -57,21 +56,19 @@ pub async fn process_radio<const N: usize>(
                 if sphone.is_active() {
                     bus.phone_call.state(|call| {
                         radio_display.modify(|display| {
-                            display.update_phone_info(&call);
+                            display.update_phone_info(call);
                             true
                         });
                     });
                 } else if saudio.is_active() {
                     bus.audio_track.state(|track| {
                         radio_display.modify(|display| {
-                            display.update_track_info(&track);
+                            display.update_track_info(track);
                             true
                         });
                     });
                 }
             }
         }
-
-        bus.service.wait_enabled().await?;
     }
 }

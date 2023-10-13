@@ -124,7 +124,7 @@ pub mod message {
                 TOPIC_RADIO_SOURCE => Topic::RadioSource(payload.into()),
                 other => Topic::Unknown {
                     topic: other,
-                    payload: payload,
+                    payload,
                 },
             }
         }
@@ -390,7 +390,7 @@ pub mod message {
                     total_chunks,
                     text,
                 } => {
-                    let mut payload = encode_display_text(&text);
+                    let mut payload = encode_display_text(text);
                     payload[0] = (((total_chunks - 1) << 4) | chunk) as u8;
                     payload[1] = (((if for_radio { 2 } else { 1 }) << 4)
                         | (if !for_radio && menu { 0x06 } else { 0x0a }))
@@ -422,7 +422,7 @@ pub mod message {
                     let mut payload = FramePayload::new();
                     payload.extend(repeat(0).take(8));
 
-                    encode_text(&text, &mut payload);
+                    encode_text(text, &mut payload);
 
                     payload
                 }
@@ -587,7 +587,7 @@ pub mod message {
         );
         assert_eq!(
             u64::from_be_bytes(
-                encode_display_text(&decode_display_text(
+                encode_display_text(decode_display_text(
                     &0x101A8177D4610A0E_u64.to_be_bytes(),
                     &mut str_buf
                 ))
@@ -611,6 +611,7 @@ pub mod message {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn process<const N: usize>(
     bus: BusSubscription<'_>,
     mut can: impl Peripheral<P = CAN>,
@@ -618,57 +619,57 @@ pub async fn process<const N: usize>(
     mut rx: impl Peripheral<P = impl InputPin>,
     str_buf: &mut heapless::String<N>,
     radio: Sender<'_, impl RawMutex, RadioState>,
-    buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
+    _buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
     radio_commands: Sender<'_, impl RawMutex, BtCommand>,
 ) -> Result<(), Error> {
     loop {
         bus.service.wait_enabled().await?;
 
-        loop {
+        {
             bus.service.starting();
 
             let mut driver = create(&mut can, &mut tx, &mut rx)?;
 
             let raw_buttons = &Signal::<NoopRawMutex, _>::new();
 
-            let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
-            let send_radio_display = &Signal::<NoopRawMutex, _>::new();
-            let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
+            //let send_radio_switch = &Signal::<NoopRawMutex, _>::new();
+            //let send_radio_display = &Signal::<NoopRawMutex, _>::new();
+            //let send_cockpit_display = &Signal::<NoopRawMutex, _>::new();
             let send_proxi = &Signal::<NoopRawMutex, _>::new();
             let send_status = &Signal::<NoopRawMutex, _>::new();
 
             driver.start()?;
 
-            bus.service.started();
+            let _started = bus.service.started();
 
-            let res = SelectSpawn::run(bus.service.wait_disabled())
-                .chain(process_radio_mux(
-                    &bus.audio,
-                    &bus.phone,
-                    &bus.radio,
-                    &radio_commands,
-                    send_radio_switch,
-                ))
-                .chain(process_display(
-                    &bus.radio_display,
-                    true,
-                    send_radio_display,
-                ))
+            SelectSpawn::run(bus.service.wait_disabled())
+                // .chain(process_radio_mux(
+                //     &bus.audio,
+                //     &bus.phone,
+                //     &bus.radio,
+                //     &radio_commands,
+                //     send_radio_switch,
+                // ))
+                // .chain(process_display(
+                //     &bus.radio_display,
+                //     true,
+                //     send_radio_display,
+                // ))
                 // .chain(process_display(
                 //     &bus.cockpit_display,
                 //     false,
                 //     send_cockpit_display,
                 // ))
-                .chain(process_send(
-                    &driver,
-                    &[
-                        send_radio_switch,
-                        send_radio_display,
-                        send_cockpit_display,
-                        send_proxi,
-                        send_status,
-                    ],
-                ))
+                // .chain(process_send(
+                //     &driver,
+                //     &[
+                //         send_radio_switch,
+                //         send_radio_display,
+                //         send_cockpit_display,
+                //         send_proxi,
+                //         send_status,
+                //     ],
+                // ))
                 //.chain(process_debounce_buttons(raw_buttons, &buttons))
                 .chain(process_recv(
                     &driver,
@@ -679,13 +680,9 @@ pub async fn process<const N: usize>(
                     &radio,
                     raw_buttons,
                 ))
-                .await;
+                .await?;
 
             driver.stop()?;
-
-            bus.service.stopped();
-
-            res?;
         }
     }
 }
@@ -828,7 +825,7 @@ async fn process_recv<'d, const N: usize>(
                 proxi_out,
             ),
             Topic::SteeringWheel(payload) => process_recv_steering_wheel(payload, raw_buttons),
-            Topic::RadioSource(payload) => process_recv_radio_source(payload, &radio),
+            Topic::RadioSource(payload) => process_recv_radio_source(payload, radio),
             _ => (),
         }
     }
@@ -892,9 +889,8 @@ fn process_recv_steering_wheel(
     payload: SteeringWheel<'_>,
     buttons: &Signal<impl RawMutex, EnumSet<SteeringWheelButton>>,
 ) {
-    match payload {
-        SteeringWheel::Buttons(state) => buttons.signal(state),
-        _ => (),
+    if let SteeringWheel::Buttons(state) = payload {
+        buttons.signal(state);
     }
 }
 

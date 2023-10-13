@@ -147,23 +147,20 @@ pub async fn process_audio_mux(
     audio_buffers: &SharedAudioBuffers<'_>,
 ) -> Result<(), Error> {
     loop {
-        bus.service.wait_enabled().await?;
-
-        bus.service.starting();
-        bus.service.started();
+        let _started = bus.service.started_when_enabled().await?;
 
         loop {
             let state = select(bus.service.wait_disabled(), bus.phone.recv()).await;
 
             match state {
-                Either::First(other) => break other,
+                Either::First(other) => break other?,
                 Either::Second(state) => {
                     audio_buffers.lock(|buffers| {
                         buffers.borrow_mut().set_a2dp(!state.is_active());
                     });
                 }
             }
-        }?;
+        }
     }
 }
 

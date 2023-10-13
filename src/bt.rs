@@ -1,7 +1,6 @@
-use core::cell::RefCell;
-
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
+use embassy_sync::mutex::Mutex;
 use esp_idf_svc::bt::a2dp::{AudioStatus, ConnectionStatus};
 use esp_idf_svc::bt::avrc::{KeyCode, Notification, PlaybackStatus};
 use esp_idf_svc::bt::hfp::client::{self, CallSetupStatus};
@@ -35,8 +34,9 @@ use crate::error::Error;
 use crate::select_spawn::SelectSpawn;
 use crate::signal::{Receiver, Sender, StatefulSender};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn process(
-    modem: &RefCell<impl Peripheral<P = impl BluetoothModemPeripheral>>,
+    modem: &Mutex<impl RawMutex, impl Peripheral<P = impl BluetoothModemPeripheral>>,
     nvs: EspDefaultNvsPartition,
     bus: BusSubscription<'_>,
     bt: Sender<'_, impl RawMutex + Sync, BtState>,
@@ -49,10 +49,10 @@ pub async fn process(
     loop {
         bus.service.wait_enabled().await?;
 
-        {
-            bus.service.starting();
+        bus.service.starting();
 
-            let mut modem = modem.borrow_mut();
+        {
+            let mut modem = modem.lock().await;
 
             let driver = BtDriver::<BtClassic>::new(&mut modem, Some(nvs.clone()))?;
 
@@ -113,7 +113,7 @@ pub async fn process(
 
             a2dp.set_delay(core::time::Duration::from_millis(150))?;
 
-            bus.service.started();
+            let _started = bus.service.started();
 
             SelectSpawn::run(bus.service.wait_disabled())
                 .chain(process_commands(&bus.radio_commands, &a2dp, &avrcc, &hfpc))
