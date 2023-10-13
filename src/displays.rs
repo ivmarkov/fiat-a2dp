@@ -25,9 +25,9 @@ use crate::{
 //     todo!()
 // }
 
-pub async fn process_radio(
+pub async fn process_radio<const N: usize>(
     bus: BusSubscription<'_>,
-    radio_display: StatefulSender<'_, impl RawMutex, DisplayText>,
+    radio_display: StatefulSender<'_, impl RawMutex, DisplayText<N>>,
 ) -> Result<(), Error> {
     loop {
         bus.service.starting();

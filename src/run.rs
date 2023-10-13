@@ -37,6 +37,10 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
 
     let usb_cutoff = peripherals.pins.gpio13;
 
+    let mut str_buf = heapless::String::<32>::new();
+
+    let str_buf = &mut str_buf;
+
     let nvs = EspDefaultNvsPartition::take()?;
 
     warn!("Before allocations");
@@ -121,6 +125,7 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
             can,
             tx,
             rx,
+            str_buf,
             bus.radio.sender(),
             bus.buttons.sender(),
             bus.radio_commands.sender(),

@@ -61,7 +61,6 @@ pub mod message {
     const CHAR_MAP: &str = "0123456789.ABCDEFGHIJKLMNOPQRSTUVWXYZ%% %ij%%%%%%_%%?@!+-:/#*%;";
 
     pub type FramePayload = heapless::Vec<u8, 8>;
-    pub type DisplayString = heapless::String<12>;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub enum Publisher {
@@ -99,6 +98,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum Topic<'a> {
         BodyComputer(BodyComputer<'a>),
         Proxi(Proxi<'a>),
@@ -111,18 +111,16 @@ pub mod message {
         Unknown { topic: u16, payload: &'a [u8] },
     }
 
-    impl<'a> From<(u16, &'a [u8])> for Topic<'a> {
-        fn from(value: (u16, &'a [u8])) -> Self {
-            let payload = value.1;
-
-            match value.0 {
+    impl<'a, const N: usize> From<(u16, &'a [u8], &'a mut heapless::String<N>)> for Topic<'a> {
+        fn from((value, payload, str_buf): (u16, &'a [u8], &'a mut heapless::String<N>)) -> Self {
+            match value {
                 TOPIC_UNITS_STATUS => Topic::BodyComputer(payload.into()),
                 TOPIC_PROXI => Topic::Proxi(payload.into()),
                 TOPIC_STEERING_WHEEL => Topic::SteeringWheel(payload.into()),
                 TOPIC_DATETIME => Topic::DateTime(payload.into()),
                 TOPIC_BT => Topic::Bt(payload.into()),
-                TOPIC_DISPLAY => Topic::Display(payload.into()),
-                TOPIC_RADIO_STATION => Topic::RadioStation(payload.into()),
+                TOPIC_DISPLAY => Topic::Display((payload, str_buf).into()),
+                TOPIC_RADIO_STATION => Topic::RadioStation((payload, str_buf).into()),
                 TOPIC_RADIO_SOURCE => Topic::RadioSource(payload.into()),
                 other => Topic::Unknown {
                     topic: other,
@@ -155,11 +153,11 @@ pub mod message {
         pub topic: Topic<'a>,
     }
 
-    impl<'a> From<&'a Frame> for Message<'a> {
-        fn from(frame: &'a Frame) -> Self {
+    impl<'a, const N: usize> From<(&'a Frame, &'a mut heapless::String<N>)> for Message<'a> {
+        fn from((frame, str_buf): (&'a Frame, &'a mut heapless::String<N>)) -> Self {
             Self {
                 publisher: get_publisher(frame.identifier()).into(),
-                topic: (get_topic(frame.identifier()), frame.data()).into(),
+                topic: (get_topic(frame.identifier()), frame.data(), str_buf).into(),
             }
         }
     }
@@ -171,6 +169,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum BodyComputer<'a> {
         WakeupRequest,
         StatusRequest,
@@ -211,6 +210,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum Proxi<'a> {
         Request,
         Response(&'a [u8]),
@@ -253,6 +253,7 @@ pub mod message {
         VolumeUp = 15,   // 0x8000
     }
 
+    #[derive(Debug)]
     pub enum SteeringWheel<'a> {
         Buttons(EnumSet<SteeringWheelButton>),
         Unknown(&'a [u8]),
@@ -282,6 +283,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum DateTime<'a> {
         Current {
             year: u16,
@@ -313,6 +315,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum Bt<'a> {
         Mute,
         Phone,
@@ -350,22 +353,23 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum Display<'a> {
         Text {
             for_radio: bool,
             menu: bool,
-            text: DisplayString,
+            text: &'a str,
             chunk: usize,
             total_chunks: usize,
         },
         Unknown(&'a [u8]),
     }
 
-    impl<'a> From<&'a [u8]> for Display<'a> {
-        fn from(value: &'a [u8]) -> Self {
+    impl<'a, const N: usize> From<(&'a [u8], &'a mut heapless::String<N>)> for Display<'a> {
+        fn from((value, str_buf): (&'a [u8], &'a mut heapless::String<N>)) -> Self {
             match value {
                 value if value.len() == 8 => Self::Text {
-                    text: decode_display_text(value),
+                    text: decode_display_text(value, str_buf),
                     chunk: (value[0] & 0x0f) as _,
                     total_chunks: ((value[0] >> 4) + 1) as _,
                     for_radio: value[1] >> 4 == 2,
@@ -399,14 +403,15 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum RadioStation<'a> {
-        Station(DisplayString),
+        Station(&'a str),
         Unknown(&'a [u8]),
     }
 
-    impl<'a> From<&'a [u8]> for RadioStation<'a> {
-        fn from(value: &'a [u8]) -> Self {
-            Self::Station(decode_text(value))
+    impl<'a, const N: usize> From<(&[u8], &'a mut heapless::String<N>)> for RadioStation<'a> {
+        fn from(value: (&[u8], &'a mut heapless::String<N>)) -> Self {
+            Self::Station(decode_text(value.0, value.1))
         }
     }
 
@@ -426,6 +431,7 @@ pub mod message {
         }
     }
 
+    #[derive(Debug)]
     pub enum RadioSource<'a> {
         Fm(u16),
         BtPlaying,
@@ -477,14 +483,20 @@ pub mod message {
         (id & 0xffff) as _
     }
 
-    fn decode_display_text<'a>(payload: &[u8]) -> DisplayString {
-        decode_text(&payload[2..])
+    fn decode_display_text<'a, const N: usize>(
+        payload: &[u8],
+        str_buf: &'a mut heapless::String<N>,
+    ) -> &'a str {
+        decode_text(&payload[2..], str_buf)
     }
 
-    fn decode_text<'a>(payload: &[u8]) -> DisplayString {
+    fn decode_text<'a, const N: usize>(
+        payload: &[u8],
+        str_buf: &'a mut heapless::String<N>,
+    ) -> &'a str {
         let mut offset = 0;
 
-        let mut string = DisplayString::new();
+        str_buf.clear();
         while offset < payload.len() << 3 {
             let char_start = offset >> 3;
             let char_end = (offset + 6) >> 3;
@@ -506,12 +518,12 @@ pub mod message {
                 break;
             }
 
-            let _ = string.push(CHAR_MAP.as_bytes()[(index - 1) as usize] as char);
+            let _ = str_buf.push(CHAR_MAP.as_bytes()[(index - 1) as usize] as char);
 
             offset += 6;
         }
 
-        string
+        str_buf.as_str()
     }
 
     fn encode_display_text(text: &str) -> FramePayload {
@@ -563,19 +575,24 @@ pub mod message {
 
     #[test]
     fn test() {
+        let mut str_buf = heapless::String::<32>::new();
+
         assert_eq!(
-            decode_display_text(&0x101A8177D4610A0E_u64.to_be_bytes()),
+            decode_display_text(&0x101A8177D4610A0E_u64.to_be_bytes(), &mut str_buf),
             "ULTIME "
         );
         assert_eq!(
-            decode_display_text(&0x111A4D43182E8000_u64.to_be_bytes()),
+            decode_display_text(&0x111A4D43182E8000_u64.to_be_bytes(), &mut str_buf),
             "HIAM. "
         );
         assert_eq!(
             u64::from_be_bytes(
-                encode_display_text(&decode_display_text(&0x101A8177D4610A0E_u64.to_be_bytes()))
-                    .into_array()
-                    .unwrap()
+                encode_display_text(&decode_display_text(
+                    &0x101A8177D4610A0E_u64.to_be_bytes(),
+                    &mut str_buf
+                ))
+                .into_array()
+                .unwrap()
             ),
             0x00008177d4610a00
         );
@@ -586,18 +603,20 @@ pub mod message {
         assert_eq!(
             decode_display_text(
                 &u64::from_be_bytes(encode_display_text("BLAH ").into_array().unwrap())
-                    .to_be_bytes()
+                    .to_be_bytes(),
+                &mut str_buf,
             ),
             "BLAH "
         );
     }
 }
 
-pub async fn process(
+pub async fn process<const N: usize>(
     bus: BusSubscription<'_>,
     mut can: impl Peripheral<P = CAN>,
     mut tx: impl Peripheral<P = impl OutputPin>,
     mut rx: impl Peripheral<P = impl InputPin>,
+    str_buf: &mut heapless::String<N>,
     radio: Sender<'_, impl RawMutex, RadioState>,
     buttons: Sender<'_, impl RawMutex, EnumSet<SteeringWheelButton>>,
     radio_commands: Sender<'_, impl RawMutex, BtCommand>,
@@ -630,11 +649,11 @@ pub async fn process(
                     &radio_commands,
                     send_radio_switch,
                 ))
-                // .chain(process_display(
-                //     &bus.radio_display,
-                //     true,
-                //     send_radio_display,
-                // ))
+                .chain(process_display(
+                    &bus.radio_display,
+                    true,
+                    send_radio_display,
+                ))
                 // .chain(process_display(
                 //     &bus.cockpit_display,
                 //     false,
@@ -653,6 +672,7 @@ pub async fn process(
                 //.chain(process_debounce_buttons(raw_buttons, &buttons))
                 .chain(process_recv(
                     &driver,
+                    str_buf,
                     &bus.service,
                     send_status,
                     send_proxi,
@@ -717,8 +737,8 @@ async fn process_radio_mux(
     }
 }
 
-async fn process_display(
-    text: &StatefulReceiver<'_, impl RawMutex, DisplayText>,
+async fn process_display<const N: usize>(
+    text: &StatefulReceiver<'_, impl RawMutex, DisplayText<N>>,
     for_radio: bool,
     display_out: &Signal<impl RawMutex, Frame>,
 ) -> Result<(), Error> {
@@ -741,24 +761,25 @@ async fn process_display(
                 let text = &text.text;
 
                 let chunk_payload = &text[offset..min(offset + 8, text.len())];
+                //let chunk_payload = &text[offset..text.len()];
                 let chunk = offset / 8;
-                let total_chunks = if text.is_empty() {
-                    1
-                } else {
-                    text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 })
-                } - 1;
+                let total_chunks = text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 });
 
                 let topic = Topic::Display(Display::Text {
                     for_radio,
                     menu,
-                    text: chunk_payload.into(),
+                    text: chunk_payload,
                     chunk,
                     total_chunks,
                 });
 
-                display_out.signal(as_frame(topic));
+                println!("{topic:?}");
 
-                if chunk == total_chunks {
+                //     //display_out.signal(as_frame(topic));
+
+                offset += 8;
+
+                if text.len() <= offset {
                     processing = false;
                 }
             }
@@ -779,8 +800,9 @@ async fn process_send<'d, const N: usize>(
     }
 }
 
-async fn process_recv<'d>(
+async fn process_recv<'d, const N: usize>(
     driver: &OwnedAsyncCanDriver<'d>,
+    str_buf: &mut heapless::String<N>,
     service: &ServiceLifecycle<'_, impl RawMutex>,
     status_out: &Signal<impl RawMutex, Frame>,
     proxi_out: &Signal<impl RawMutex, Frame>,
@@ -792,7 +814,8 @@ async fn process_recv<'d>(
 
     loop {
         let frame = driver.receive().await?;
-        let message: Message<'_> = (&frame).into();
+
+        let message: Message<'_> = (&frame, &mut *str_buf).into();
 
         match message.topic {
             Topic::BodyComputer(payload) => {

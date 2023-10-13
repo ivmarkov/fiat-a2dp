@@ -160,10 +160,7 @@ pub mod bt {
 pub mod can {
     use core::fmt::Write;
 
-    use super::{
-        bt::{PhoneCallInfo, TrackInfo},
-        DisplayString,
-    };
+    use super::bt::{PhoneCallInfo, TrackInfo};
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub enum RadioState {
@@ -180,13 +177,13 @@ pub mod can {
     }
 
     #[derive(Debug, Clone, Eq, PartialEq)]
-    pub struct DisplayText {
+    pub struct DisplayText<const N: usize> {
         pub version: u32,
         pub menu: bool,
-        pub text: DisplayString,
+        pub text: heapless::String<N>,
     }
 
-    impl DisplayText {
+    impl<const N: usize> DisplayText<N> {
         pub const fn new() -> Self {
             Self {
                 version: 0,
@@ -210,7 +207,7 @@ pub mod can {
             let mins = secs / 60;
             let secs = secs % 60;
 
-            write!(&mut self.text, "{} {:02}:{:02}", phone.phone, mins, secs).unwrap();
+            let _ = write!(&mut self.text, "{} {:02}:{:02}", phone.phone, mins, secs);
         }
 
         pub fn update_track_info(&mut self, track: &TrackInfo) {
@@ -222,12 +219,11 @@ pub mod can {
             let mins = secs / 60;
             let secs = secs % 60;
 
-            write!(
+            let _ = write!(
                 &mut self.text,
                 "{};{};{:02}:{:02}",
                 track.album, track.artist, mins, secs
-            )
-            .unwrap();
+            );
         }
     }
 }
@@ -256,8 +252,8 @@ pub struct Bus {
     pub radio_commands: BroadcastSignal<NoopRawMutex, BtCommand>,
     pub radio: BroadcastSignal<NoopRawMutex, RadioState>,
     pub buttons: BroadcastSignal<NoopRawMutex, EnumSet<SteeringWheelButton>>,
-    pub cockpit_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
-    pub radio_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText>,
+    pub cockpit_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText<13>>,
+    pub radio_display: StatefulBroadcastSignal<NoopRawMutex, DisplayText<32>>,
     pub update: BroadcastSignal<NoopRawMutex, ()>,
 }
 
@@ -310,7 +306,7 @@ pub struct BusSubscription<'a> {
     pub radio_commands: Receiver<'a, NoopRawMutex, BtCommand>,
     pub radio: Receiver<'a, NoopRawMutex, RadioState>,
     pub buttons: Receiver<'a, NoopRawMutex, EnumSet<SteeringWheelButton>>,
-    pub cockpit_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
-    pub radio_display: StatefulReceiver<'a, NoopRawMutex, DisplayText>,
+    pub cockpit_display: StatefulReceiver<'a, NoopRawMutex, DisplayText<13>>,
+    pub radio_display: StatefulReceiver<'a, NoopRawMutex, DisplayText<32>>,
     pub update: Receiver<'a, NoopRawMutex, ()>,
 }
