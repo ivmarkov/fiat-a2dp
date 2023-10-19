@@ -6,6 +6,7 @@ use core::{
 use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
+use embassy_time::{Duration, Timer};
 use enumset::EnumSet;
 
 use crate::{
@@ -85,22 +86,22 @@ pub async fn process(
 }
 
 async fn process_usb_cutoff(
-    _usb_cutoff: &mut UsbCutoff<'_>,
-    _usb_cutoff_disable_period: &Cell<bool>,
-    _usb_cutoff_disable: &Cell<bool>,
-    _service_mode: &Cell<bool>,
+    usb_cutoff: &mut UsbCutoff<'_>,
+    usb_cutoff_disable_period: &Cell<bool>,
+    usb_cutoff_disable: &Cell<bool>,
+    service_mode: &Cell<bool>,
     service: &ServiceLifecycle<'_, impl RawMutex>,
 ) -> Result<(), Error> {
-    // if usb_cutoff_disable_period.get() {
-    //     Timer::after(Duration::from_secs(2)).await;
-    //     usb_cutoff_disable_period.set(false);
-    // }
+    if usb_cutoff_disable_period.get() {
+        Timer::after(Duration::from_secs(2)).await;
+        usb_cutoff_disable_period.set(false);
+    }
 
-    // if !usb_cutoff_disable.get() {
-    //     usb_cutoff.cutoff()?;
-    // } else if !service_mode.get() {
-    service.sys_set_normal_mode();
-    // }
+    if !usb_cutoff_disable.get() {
+        usb_cutoff.cutoff()?;
+    } else if !service_mode.get() {
+        service.sys_set_normal_mode();
+    }
 
     core::future::pending().await
 }

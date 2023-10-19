@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use core::cell::RefCell;
 
 use embassy_sync::{
     blocking_mutex::{raw::RawMutex, Mutex},

@@ -24,7 +24,9 @@ pub async fn process(
     timer_service: EspTaskTimerService,
 ) -> Result<(), Error> {
     loop {
-        bus.service.started_when_enabled().await?;
+        bus.service.wait_enabled().await?;
+
+        bus.service.starting();
 
         let mut modem = modem.lock().await;
 
@@ -36,7 +38,7 @@ pub async fn process(
 
         let _started = bus.service.started();
 
-        SelectSpawn::run(bus.service.wait_disabled())
+        SelectSpawn::run(&mut pin!(bus.service.wait_disabled()))
             .chain(&mut pin!(process_update(&mut driver, &bus.update)))
             .await?;
     }

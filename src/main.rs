@@ -1,7 +1,7 @@
 #![feature(new_uninit)]
 #![warn(clippy::large_futures)]
-#![allow(dead_code)]
-#![allow(unused)]
+//#![allow(dead_code)]
+//#![allow(unused)]
 
 use std::thread;
 

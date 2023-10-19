@@ -770,9 +770,9 @@ async fn process_display<const N: usize>(
                     total_chunks,
                 });
 
-                println!("{topic:?}");
+                // println!("{topic:?}");
 
-                //     //display_out.signal(as_frame(topic));
+                display_out.signal(as_frame(topic));
 
                 offset += 8;
 

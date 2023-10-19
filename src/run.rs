@@ -3,16 +3,14 @@ use core::mem::MaybeUninit;
 use edge_executor::LocalExecutor;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
 
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::task::block_on;
 use esp_idf_svc::hal::{adc::AdcMeasurement, peripherals::Peripherals};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::timer::EspTimerService;
 
-use log::{info, warn};
+use log::warn;
 
 use crate::audio::create_audio_buffers;
 use crate::bus::{Bus, Service};
@@ -72,9 +70,6 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
     let audio_buffers = create_audio_buffers(unsafe { audio_incoming.assume_init_mut() }, unsafe {
         audio_outgoing.assume_init_mut()
     });
-
-    let mut a_pin = PinDriver::input(peripherals.pins.gpio16)?;
-    a_pin.set_pull(Pull::Down)?;
 
     let executor: LocalExecutor = Default::default();
 
@@ -151,16 +146,6 @@ pub fn run(peripherals: Peripherals) -> Result<(), Error> {
             UsbCutoff::new(usb_cutoff)?,
             bus.button_commands.sender(),
         ))
-        .detach();
-
-    executor
-        .spawn(async move {
-            loop {
-                a_pin.wait_for_high().await.unwrap();
-                info!("Pin high!");
-                Timer::after(Duration::from_millis(50)).await;
-            }
-        })
         .detach();
 
     executor
