@@ -39,6 +39,7 @@ use self::message::{
 
 pub mod message {
     use core::iter::repeat;
+    use core::num::NonZeroUsize;
 
     use enumset::{EnumSet, EnumSetType};
 
@@ -361,7 +362,7 @@ pub mod message {
             menu: bool,
             text: &'a str,
             chunk: usize,
-            total_chunks: usize,
+            total_chunks: NonZeroUsize,
         },
         Unknown(&'a [u8]),
     }
@@ -372,7 +373,7 @@ pub mod message {
                 value if value.len() == 8 => Self::Text {
                     text: decode_display_text(value, str_buf),
                     chunk: (value[0] & 0x0f) as _,
-                    total_chunks: ((value[0] >> 4) + 1) as _,
+                    total_chunks: (((value[0] >> 4) + 1) as usize).try_into().unwrap(),
                     for_radio: value[1] >> 4 == 2,
                     menu: value[1] & 0x0f == 6,
                 },
@@ -392,7 +393,7 @@ pub mod message {
                     text,
                 } => {
                     let mut payload = encode_display_text(text);
-                    payload[0] = (((total_chunks - 1) << 4) | chunk) as u8;
+                    payload[0] = (((total_chunks.get() - 1) << 4) | chunk) as u8;
                     payload[1] = (((if for_radio { 2 } else { 1 }) << 4)
                         | (if !for_radio && menu { 0x06 } else { 0x0a }))
                         as u8;
@@ -760,14 +761,15 @@ async fn process_display<const N: usize>(
 
                 let chunk_payload = &text[offset..min(offset + 8, text.len())];
                 let chunk = offset / 8;
-                let total_chunks = text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 });
+                let total_chunks =
+                    core::cmp::max(text.len() / 8 + (if text.len() % 8 > 0 { 1 } else { 0 }), 1);
 
                 let topic = Topic::Display(Display::Text {
                     for_radio,
                     menu,
                     text: chunk_payload,
                     chunk,
-                    total_chunks,
+                    total_chunks: total_chunks.try_into().unwrap(),
                 });
 
                 // println!("{topic:?}");
