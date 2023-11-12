@@ -78,7 +78,9 @@ pub async fn process(
 
             info!("HFPC created");
 
-            gap.initialize(|event| handle_gap(&gap, &bt, event))?;
+            unsafe {
+                gap.initialize_nonstatic(|event| handle_gap(&gap, &bt, event))?;
+            }
 
             gap.set_cod(
                 Cod::new(
@@ -101,15 +103,25 @@ pub async fn process(
                 true
             });
 
-            avrcc.initialize(|event| handle_avrcc(&avrcc, &audio_track, event))?;
+            unsafe {
+                avrcc.initialize_nonstatic(|event| handle_avrcc(&avrcc, &audio_track, event))?;
+            }
 
             info!("AVRCC initialized");
 
-            a2dp.initialize(|event| handle_a2dp(&a2dp, &audio, audio_buffers, event))?;
+            unsafe {
+                a2dp.initialize_nonstatic(|event| {
+                    handle_a2dp(&a2dp, &audio, audio_buffers, event)
+                })?;
+            }
 
             info!("A2DP initialized");
 
-            hfpc.initialize(|event| handle_hfpc(&hfpc, &phone, &phone_call, audio_buffers, event))?;
+            unsafe {
+                hfpc.initialize_nonstatic(|event| {
+                    handle_hfpc(&hfpc, &phone, &phone_call, audio_buffers, event)
+                })?;
+            }
 
             info!("HFPC initialized");
 
